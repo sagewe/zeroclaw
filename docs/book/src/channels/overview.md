@@ -103,8 +103,9 @@ Input-only transports that feed events into the agent loop or the SOP engine. Th
 | MQTT | `channel-mqtt` | Broker messages → agent or SOP |
 | AMQP | `channel-amqp` | Broker deliveries → agent or SOP |
 | Filesystem | `channel-filesystem` | Path changes → agent or SOP |
+| Event Watch | `channel-event-watch` | Scoped Fastmail / Home Assistant observations → SOP |
 
-See [MQTT](./mqtt.md), [AMQP](./amqp.md), and [Filesystem](./filesystem.md).
+See [MQTT](./mqtt.md), [AMQP](./amqp.md), [Filesystem](./filesystem.md), and [Event Watch](./event-watch.md).
 
 ## Configuration
 

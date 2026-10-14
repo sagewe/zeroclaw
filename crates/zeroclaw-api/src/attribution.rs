@@ -95,6 +95,7 @@ pub enum ChannelKind {
     Discord,
     Email,
     Filesystem,
+    EventWatch,
     Git,
     GmailPush,
     #[strum(serialize = "imessage")]

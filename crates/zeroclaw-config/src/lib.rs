@@ -14,6 +14,7 @@ pub mod comment_writer;
 pub mod cost;
 pub mod domain_matcher;
 pub mod env_overrides;
+pub mod event_watch;
 pub mod field_visibility;
 pub mod helpers;
 pub mod live;

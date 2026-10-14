@@ -15849,6 +15849,10 @@ pub enum ModelFallbackNotice {
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels"]
 pub struct ChannelsConfig {
+    /// Input-only Fastmail and Home Assistant event watches (`[channels.event_watch.<alias>]`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub event_watch: HashMap<String, crate::event_watch::EventWatchConfig>,
     /// Enable the CLI interactive channel. Default: `true`.
     #[serde(default = "default_true")]
     pub cli: bool,
@@ -16295,6 +16299,13 @@ impl ChannelsConfig {
                 configured: !self.filesystem.is_empty(),
             },
             ChannelInfo {
+                kind: "event_watch",
+                config_key: "event_watch",
+                name: "Event Watch",
+                desc: "Fastmail and Home Assistant SOP event observers",
+                configured: !self.event_watch.is_empty(),
+            },
+            ChannelInfo {
                 kind: "webhook",
                 config_key: "webhook",
                 name: "Webhook",
@@ -16351,6 +16362,7 @@ impl ChannelsConfig {
             || self.mqtt.values().any(|c| c.enabled)
             || self.amqp.values().any(|c| c.enabled)
             || self.filesystem.values().any(|c| c.enabled)
+            || self.event_watch.values().any(|c| c.enabled)
             || self.git.values().any(|c| c.enabled)
             || self.plugin.values().any(|c| c.enabled)
     }
@@ -16362,7 +16374,7 @@ impl ChannelsConfig {
     /// amqp are fan-in listeners; voice_wake is input-only), so a name-addressed
     /// outbound surface such as `heartbeat.target` can refuse them at validation
     /// instead of accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 36] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 37] {
         [
             ("telegram", !self.telegram.is_empty(), true),
             ("discord", !self.discord.is_empty(), true),
@@ -16399,6 +16411,7 @@ impl ChannelsConfig {
             ("mqtt", !self.mqtt.is_empty(), false),
             ("amqp", !self.amqp.is_empty(), false),
             ("filesystem", !self.filesystem.is_empty(), false),
+            ("event_watch", !self.event_watch.is_empty(), false),
             ("plugin", !self.plugin.is_empty(), true),
         ]
     }
@@ -16485,6 +16498,7 @@ impl Default for ChannelsConfig {
             mqtt: HashMap::new(),
             amqp: HashMap::new(),
             filesystem: HashMap::new(),
+            event_watch: HashMap::new(),
             plugin: HashMap::new(),
             message_timeout_secs: default_channel_message_timeout_secs(),
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
@@ -33019,6 +33033,7 @@ auto_save = true
                 mqtt: HashMap::new(),
                 amqp: HashMap::new(),
                 filesystem: HashMap::new(),
+                event_watch: HashMap::new(),
                 plugin: HashMap::new(),
                 message_timeout_secs: 300,
                 max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
@@ -35199,6 +35214,7 @@ allowed_users = ["@u:matrix.org"]
             mqtt: HashMap::new(),
             amqp: HashMap::new(),
             filesystem: HashMap::new(),
+            event_watch: HashMap::new(),
             plugin: HashMap::new(),
             message_timeout_secs: 300,
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
@@ -35818,6 +35834,7 @@ allowed_numbers = ["+1", "+2"]
             mqtt: HashMap::new(),
             amqp: HashMap::new(),
             filesystem: HashMap::new(),
+            event_watch: HashMap::new(),
             plugin: HashMap::new(),
             message_timeout_secs: 300,
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
@@ -49714,7 +49731,14 @@ model_provider = \"ollama.default\"
         undeliverable.sort_unstable();
         assert_eq!(
             undeliverable,
-            ["amqp", "filesystem", "mqtt", "voice_duplex", "voice_wake"],
+            [
+                "amqp",
+                "event_watch",
+                "filesystem",
+                "mqtt",
+                "voice_duplex",
+                "voice_wake"
+            ],
             "only input-only transports may be non-deliverable; update channel_presence and is_channel_deliverable together"
         );
     }

@@ -14226,6 +14226,64 @@ fn collect_configured_channels_with_authority(
 
     let active_channel_aliases = ActiveChannelAliases::compute(&config);
 
+    #[cfg(feature = "channel-event-watch")]
+    for (alias, watch) in &config.channels.event_watch {
+        if !watch.enabled || !active_channel_aliases.contains(&format!("event_watch.{alias}")) {
+            continue;
+        }
+        if let Err(error) = watch.validate() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_attrs(serde_json::json!({"alias":alias,"error":error.to_string()})),
+                "Invalid event watch; listener not started"
+            );
+            continue;
+        }
+        let (Some(engine), Some(audit), Some(driver)) = (&sop_engine, &sop_audit, &sop_driver_sink)
+        else {
+            if !config.sop.runtime_enabled() {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_attrs(serde_json::json!({"alias":alias})),
+                    "Event watch requires the SOP engine and its headless driver; listener not started"
+                );
+            }
+            // Outbound-only channel-map projections intentionally have no SOP
+            // handles and must not instantiate this input-only listener.
+            continue;
+        };
+        channels.push(ConfiguredChannel {
+            display_name: "Event Watch",
+            alias: Some(alias.clone()),
+            channel: Arc::new(crate::event_watch::EventWatchChannel::new(
+                alias.clone(),
+                config_arc.clone(),
+                config
+                    .channel_workspace_dir(&format!("event_watch.{alias}"))
+                    .join("events"),
+                engine.clone(),
+                audit.clone(),
+                driver.clone(),
+            )),
+        });
+    }
+
+    #[cfg(not(feature = "channel-event-watch"))]
+    if config
+        .channels
+        .event_watch
+        .values()
+        .any(|watch| watch.enabled)
+    {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject),
+            "Event Watch configured without channel-event-watch build feature; listeners not started"
+        );
+    }
+
     if active_channel_aliases.disabled_owners_exist() {
         let skipped: Vec<&String> = active_channel_aliases.all_known_bindings.iter().collect();
         ::zeroclaw_log::record!(

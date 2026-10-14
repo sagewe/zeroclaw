@@ -46,6 +46,8 @@ pub mod discord;
 pub mod discord_slash_state;
 #[cfg(feature = "channel-email")]
 pub mod email_channel;
+#[cfg(feature = "channel-event-watch")]
+pub mod event_watch;
 #[cfg(feature = "channel-filesystem")]
 pub mod filesystem;
 #[cfg(feature = "channel-git")]
