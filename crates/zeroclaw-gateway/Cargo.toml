@@ -9,6 +9,7 @@ homepage.workspace = true
 publish = true
 
 [dependencies]
+zeroclaw-events.workspace = true
 # Internal workspace crates
 zeroclaw-api.workspace = true
 zeroclaw-spawn.workspace = true

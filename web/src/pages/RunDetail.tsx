@@ -121,6 +121,7 @@ export default function RunDetail() {
 
   return (
     <div className="p-6 space-y-6 animate-fade-in">
+      <Link to={'/events/history?run='+encodeURIComponent(runId)} className="inline-block text-xs text-pc-text-secondary hover:text-pc-accent">{t('events.origin')}</Link>
       <PageHeader
         title={sop}
         description={runId}

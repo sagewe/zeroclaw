@@ -51,3 +51,5 @@ pub mod security {
     pub use crate::policy::SecurityPolicy;
     pub use crate::secrets::SecretStore;
 }
+
+pub mod events;

@@ -14055,6 +14055,7 @@ dependencies = [
  "zeroclaw-channels",
  "zeroclaw-config",
  "zeroclaw-eval",
+ "zeroclaw-events",
  "zeroclaw-gateway",
  "zeroclaw-hardware",
  "zeroclaw-infra",
@@ -14194,6 +14195,7 @@ dependencies = [
  "wiremock",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-events",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-memory",
@@ -14309,6 +14311,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-events"
+version = "0.8.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "hex",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "url",
+ "wiremock",
+ "zeroclaw-api",
+ "zeroclaw-config",
+ "zeroclaw-log",
+ "zeroclaw-memory",
+ "zeroclaw-runtime",
+ "zeroclaw-spawn",
+ "zeroclaw-tools",
+]
+
+[[package]]
 name = "zeroclaw-gateway"
 version = "0.8.5"
 dependencies = [
@@ -14353,6 +14383,7 @@ dependencies = [
  "zeroclaw-api",
  "zeroclaw-channels",
  "zeroclaw-config",
+ "zeroclaw-events",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-memory",

@@ -5,6 +5,7 @@ import { railAsideStyle, railLinkClassName, railNavClassName } from './sidebarRa
 import { SidebarNavLink } from './SidebarNavLink';
 import {
   Activity,
+  Radio,
   ArrowDownToLine,
   Blocks,
   Bot,
@@ -62,6 +63,7 @@ const navGroups: NavGroup[] = [
       { to: '/config/agents', icon: Bot, labelKey: 'nav.agent' },
       { to: '/tools', icon: Wrench, labelKey: 'nav.tools' },
       { to: '/skills', icon: Sparkles, labelKey: 'nav.skills' },
+      { to: '/events', icon: Radio, labelKey: 'nav.events' },
       { to: '/sops', icon: Workflow, labelKey: 'nav.sops' },
       { to: '/runs', icon: ListChecks, labelKey: 'nav.runs' },
       { to: '/integrations', icon: Puzzle, labelKey: 'nav.integrations' },

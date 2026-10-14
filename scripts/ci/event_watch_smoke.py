@@ -13,6 +13,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=Path)
+    parser.add_argument("--native", action="store_true")
     args = parser.parse_args()
     binary = args.binary.resolve()
     state = {"value": "on", "reads": 0, "model_calls": 0, "unexpected": []}
@@ -152,6 +155,13 @@ enabled = false
 [relay]
 enabled = false
 ''')
+        if args.native:
+            path = root / "config.toml"
+            config = path.read_text().replace('channels = ["event_watch.fixture"]', 'channels = []')
+            start = config.index('[channels.event_watch.fixture]')
+            end = config.index('[[mcp.servers]]', start)
+            config = config[:start] + '[events.sources.ha]\nenabled = true\nkind = "home_assistant"\nmcp_server = "fixture"\npoll_interval_secs = 10\nentities = ["light.example"]\n[events.rules.fixture]\nenabled = true\nsource = "ha"\nsop = "review"\nstates = ["unavailable"]\nfor_secs = 0\ncooldown_secs = 0\n' + config[end:]
+            path.write_text(config)
         env = {k: v for k, v in os.environ.items() if not k.startswith("ZEROCLAW_")}
         env["NO_PROXY"] = "127.0.0.1,localhost"
         process = None
@@ -202,11 +212,55 @@ enabled = false
             with log_path.open("a") as log:
                 process = start()
                 wait_until(baseline_committed)
+                if args.native:
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    def api(path, body=None, headers=None, method=None):
+                        request = urllib.request.Request(f"http://127.0.0.1:{port}" + path,
+                            data=None if body is None else json.dumps(body).encode(),
+                            headers={"Content-Type":"application/json", **(headers or {})}, method=method)
+                        with opener.open(request, timeout=15) as response:
+                            return json.load(response)
+                    def gateway_ready():
+                        try:
+                            api("/health")
+                            return True
+                        except (OSError, urllib.error.URLError):
+                            return False
+                    wait_until(gateway_ready)
+                    try:
+                        api("/api/event-monitor")
+                        raise AssertionError("anonymous event history was exposed")
+                    except urllib.error.HTTPError as error:
+                        assert error.code == 401
+                    admin = next(root.rglob("gateway-admin.token")).read_text().strip()
+                    code = api("/admin/paircode/new", {}, {"x-zeroclaw-admin-token": admin})["pairing_code"]
+                    token = api("/pair", {}, {"X-Pairing-Code":code})["token"]
+                    auth = {"Authorization":"Bearer " + token}
+                    overview = api("/api/event-monitor", headers=auth)
+                    assert overview["rules"][0]["last_poll_ms"] is not None
+                    assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"on","duration_secs":100}, auth)["matched"] is False
+                    assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"unavailable","duration_secs":100}, auth)["matched"] is True
+                    assert not runs(), "simulation started a SOP"
+                    overview["config"]["sources"]["ha"]["enabled"] = False
+                    api("/api/event-monitor", {"config":overview["config"],"revision":overview["revision"]}, auth, "PUT")
+                    time.sleep(3)
+                    paused_reads = state["reads"]
+                    time.sleep(11)
+                    assert state["reads"] == paused_reads, "paused source kept polling"
+                    fresh = api("/api/event-monitor", headers=auth)
+                    fresh["config"]["sources"]["ha"]["enabled"] = True
+                    api("/api/event-monitor", {"config":fresh["config"],"revision":fresh["revision"]}, auth, "PUT")
+                    wait_until(lambda: state["reads"] > paused_reads)
                 warmed_up_calls = state["model_calls"]
                 assert not runs(), "baseline unexpectedly started a run"
                 state["value"] = "unavailable"
                 wait_until(lambda: any(r.get("status") == "completed" for r in runs()))
                 assert len(runs()) == 1
+                if args.native:
+                    records = api("/api/event-monitor", headers=auth)["records"]
+                    assert len(records) == 1
+                    assert records[0]["run_id"] == runs()[0]["run_id"]
+                    assert records[0]["run_status"] == "completed"
                 assert state["model_calls"] == warmed_up_calls, "event observer unexpectedly called a model"
                 process.terminate()
                 process.wait(timeout=15)
@@ -218,6 +272,11 @@ enabled = false
                 assert len(runs()) == 1, "restart replayed a delivered event"
                 assert not state["unexpected"], state["unexpected"]
                 print("PASS: daemon baseline -> state transition -> completed SOP -> restart without replay")
+        except Exception:
+            print(diagnostic())
+            if log_path.exists():
+                print(log_path.read_text()[-5000:])
+            raise
         finally:
             if process and process.poll() is None:
                 process.terminate()

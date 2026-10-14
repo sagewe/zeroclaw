@@ -82,6 +82,9 @@ pub fn build_spec() -> serde_json::Value {
 
     let components = serde_json::json!({
         "schemas": {
+            "EventsResponse": schema_value::<crate::api_events::EventsResponse>(),
+            "EventsWrite": schema_value::<crate::api_events::EventsWrite>(),
+            "EventSimulation": schema_value::<crate::api_events::EventSimulation>(),
             "ConfigApiError":   schema_value::<ConfigApiError>(),
             "PropPutBody":      schema_value::<PropPutBody>(),
             "PropResponse":     schema_value::<PropResponse>(),
@@ -464,6 +467,13 @@ pub fn build_spec() -> serde_json::Value {
         schema_value::<zeroclaw_api::a2a_wire::Task>(),
         schema_value::<zeroclaw_api::a2a_wire::Message>(),
     );
+    if let Some(paths) = spec.pointer_mut("/paths").and_then(|v| v.as_object_mut()) {
+        paths.insert("/api/event-monitor".into(), serde_json::json!({
+            "get": {"summary":"Event sources, rules, health and delivery history", "responses":{"200":{"description":"Event overview","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventsResponse"}}}}}},
+            "put": {"summary":"Update event settings with optimistic concurrency", "requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventsWrite"}}}},"responses":{"200":{"description":"Saved"},"409":{"description":"Stale revision"},"422":{"description":"Invalid event policy"}}}
+        }));
+        paths.insert("/api/event-monitor/simulate".into(), serde_json::json!({"post":{"summary":"Evaluate a rule without side effects","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventSimulation"}}}},"responses":{"200":{"description":"Condition result; no SOP is started"}}}}));
+    }
     flatten_defs_into_components(&mut spec);
     spec
 }

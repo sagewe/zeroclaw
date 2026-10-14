@@ -23,3 +23,5 @@ export const SopEditor = lazy(() =>
 );
 export const Runs = lazy(() => import('../pages/Runs'));
 export const RunDetail = lazy(() => import('../pages/RunDetail'));
+
+export const Events = lazy(() => import('../pages/Events'));

@@ -18,6 +18,7 @@ import {
   Quickstart,
   RunDetail,
   Runs,
+  Events,
   Skills,
   SopEditor,
   SopView,
@@ -52,6 +53,8 @@ export const Router = () => (
         <Route path="/sops/new" element={<SopEditor />} />
         <Route path="/sops/:name" element={<SopView />} />
         <Route path="/sops/:name/edit" element={<SopEditor />} />
+        <Route path="/events" element={<Navigate to="/events/sources" replace />} />
+        <Route path="/events/:tab" element={<Events />} />
         <Route path="/runs" element={<Runs />} />
         <Route path="/runs/:sop/:runId" element={<RunDetail />} />
         <Route path="/integrations" element={<Integrations />} />

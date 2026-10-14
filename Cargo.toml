@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-buildinfo", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-dist", "crates/zeroclaw-log", "crates/zeroclaw-log/tests/fixtures/attribution-macro-support", "crates/zeroclaw-log/tests/fixtures/attribution-macro-consumer", "crates/zeroclaw-tls", "crates/zeroclaw-relay-proto", "apps/zerorelay", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "apps/zerocode", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-plugins/tests/fixtures/channel-egress-fixture", "crates/zeroclaw-plugins/tests/fixtures/channel-websocket-fixture", "crates/zeroclaw-plugins/tests/fixtures/egress-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-timeout-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-sequential-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-secret-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-socket-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-websocket-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "apps/tauri", "tools/fill-translations", "xtask"]
+members = ["crates/zeroclaw-events", ".", "crates/zeroclaw-api", "crates/zeroclaw-buildinfo", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-dist", "crates/zeroclaw-log", "crates/zeroclaw-log/tests/fixtures/attribution-macro-support", "crates/zeroclaw-log/tests/fixtures/attribution-macro-consumer", "crates/zeroclaw-tls", "crates/zeroclaw-relay-proto", "apps/zerorelay", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "apps/zerocode", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-plugins/tests/fixtures/channel-egress-fixture", "crates/zeroclaw-plugins/tests/fixtures/channel-websocket-fixture", "crates/zeroclaw-plugins/tests/fixtures/egress-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-timeout-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-sequential-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-secret-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-socket-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-websocket-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "apps/tauri", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -11,6 +11,7 @@ homepage = "https://www.zeroclaw.com"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
+zeroclaw-events = { path = "crates/zeroclaw-events", version = "0.8.5" }
 zeroclaw-api = { path = "crates/zeroclaw-api", version = "0.8.5" }
 zeroclaw-buildinfo = { path = "crates/zeroclaw-buildinfo", version = "0.8.5" }
 zeroclaw-infra = { path = "crates/zeroclaw-infra", version = "0.8.5" }
@@ -85,6 +86,7 @@ path = "src/lib.rs"
 zeroclaw-buildinfo.workspace = true
 
 [dependencies]
+zeroclaw-events = { workspace = true, optional = true }
 # Internal workspace crates — versions and paths declared once in [workspace.dependencies]
 zeroclaw-api.workspace = true
 zeroclaw-spawn.workspace = true
@@ -324,7 +326,7 @@ channel-reddit = ["zeroclaw-channels/channel-reddit"]
 channel-notion = ["zeroclaw-channels/channel-notion"]
 channel-mqtt = ["zeroclaw-channels/channel-mqtt"]
 channel-filesystem = ["zeroclaw-channels/channel-filesystem"]
-channel-event-watch = ["zeroclaw-channels/channel-event-watch"]
+channel-event-watch = ["dep:zeroclaw-events", "zeroclaw-channels/channel-event-watch"]
 channel-amqp = ["zeroclaw-channels/channel-amqp"]
 channel-linq = ["zeroclaw-channels/channel-linq", "zeroclaw-gateway?/channel-linq"]
 channel-nextcloud = ["zeroclaw-channels/channel-nextcloud", "zeroclaw-gateway?/channel-nextcloud"]

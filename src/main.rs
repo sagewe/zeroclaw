@@ -9856,6 +9856,19 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     })
                 }));
 
+                #[cfg(feature = "channel-event-watch")]
+                let event_service = match (&sop_engine, &sop_audit, &sop_driver_sink) {
+                    (Some(engine), Some(audit), Some(driver)) => {
+                        Some(zeroclaw_events::service::EventService::start(
+                            authority.live_handle(),
+                            engine.clone(),
+                            audit.clone(),
+                            driver.clone(),
+                        ))
+                    }
+                    _ => None,
+                };
+
                 // Pass the shared SOP engine through the registry so
                 // RpcContext (RPC/TUI agent sessions) can share it.
                 registry.set_sop_engine(
@@ -9875,6 +9888,10 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     startup_feedback_enabled,
                 ))
                 .await;
+                #[cfg(feature = "channel-event-watch")]
+                if let Some(service) = event_service {
+                    service.stop().await?;
+                }
                 // Before the loop re-reads config and builds a fresh SOP
                 // engine: in-flight cron drivers hold this generation's config
                 // and engine, so they must not straddle the rebuild.

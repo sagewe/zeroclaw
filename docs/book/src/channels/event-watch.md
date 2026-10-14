@@ -1,5 +1,9 @@
 # Event Watch
 
+For independent source/rule management and the Events console, see
+[Events](../events/index.md). The channel configuration below remains a legacy
+compatibility path; do not configure the same rule in both places.
+
 Event Watch is an opt-in, input-only channel for Fastmail new-mail observations
 and Home Assistant state conditions. It runs under the existing channel
 supervisor inside `zeroclaw daemon`, and dispatches into the shared Channel SOP

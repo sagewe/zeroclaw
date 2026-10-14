@@ -375,7 +375,7 @@ async fn deterministic_observer_run_completes_through_shared_sop_path() {
 
 #[test]
 fn documented_review_step_has_no_tool_allowance() {
-    let doc = include_str!("../../../../docs/book/src/channels/event-watch.md");
+    let doc = include_str!("../../../docs/book/src/channels/event-watch.md");
     let md = doc
         .split("```markdown\n")
         .nth(1)
@@ -463,4 +463,82 @@ async fn fastmail_source_paginates_and_only_collects_metadata() {
     assert_eq!(mails.len(), 2);
     assert!(mails.iter().all(|m| m.get("bodyText").is_none()));
     assert_eq!(mails[1]["id"], "two");
+}
+
+#[test]
+fn native_rule_resolves_without_channel_binding_and_retains_live_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let (observer, authority) = harness(dir.path());
+    let mut config = authority.snapshot_config();
+    config.channels.event_watch.clear();
+    config.agents.get_mut("observer").unwrap().channels.clear();
+    config.events.sources.insert(
+        "ha".into(),
+        zeroclaw_config::events::EventSource {
+            enabled: true,
+            kind: "home_assistant".into(),
+            mcp_server: "fixture".into(),
+            entities: vec!["light.example".into()],
+            ..Default::default()
+        },
+    );
+    config.events.rules.insert(
+        "fixture".into(),
+        zeroclaw_config::events::EventRule {
+            enabled: true,
+            source: "ha".into(),
+            sop: "review".into(),
+            states: vec!["unavailable".into()],
+            ..Default::default()
+        },
+    );
+    authority.publish_for_test(config.clone());
+    assert!(observer.resolve().is_ok());
+    config.events.sources.get_mut("ha").unwrap().enabled = false;
+    authority.publish_for_test(config.clone());
+    assert!(observer.resolve().is_err());
+    config.events.sources.get_mut("ha").unwrap().enabled = true;
+    config
+        .agents
+        .get_mut("observer")
+        .unwrap()
+        .mcp_bundles
+        .clear();
+    authority.publish_for_test(config);
+    assert!(observer.resolve().is_err());
+}
+#[test]
+fn inspecting_receipts_does_not_recover_an_inflight_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let cp = Checkpoint {
+        revision: "test".into(),
+        ..Default::default()
+    };
+    let event = cp
+        .event("email_received", 123, json!({"id":"fixture"}))
+        .unwrap();
+    store.save(&cp, std::slice::from_ref(&event)).unwrap();
+    store.mark(&event.id, "dispatching").unwrap();
+    store.poll_succeeded().unwrap();
+    let view = store::inspect(dir.path(), 20).unwrap();
+    assert_eq!(view.records[0]["disposition"], "dispatching");
+    assert!(view.last_poll_ms.is_some());
+    assert_eq!(store.uncertain_count().unwrap(), 0);
+    store
+        .settle(&event.id, "delivered", Some("run-fixture"))
+        .unwrap();
+    assert_eq!(
+        store::inspect(dir.path(), 20).unwrap().records[0]["run_id"],
+        "run-fixture"
+    );
+}
+#[test]
+fn native_rule_stores_are_isolated_and_ids_cannot_escape() {
+    let config = Config::default();
+    assert_ne!(
+        service::rule_directory(&config, "mail").unwrap(),
+        service::rule_directory(&config, "lights").unwrap()
+    );
+    assert!(service::rule_directory(&config, "../outside").is_err());
 }

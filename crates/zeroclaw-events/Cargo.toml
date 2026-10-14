@@ -1,0 +1,32 @@
+[package]
+name = "zeroclaw-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zeroclaw-api.workspace = true
+zeroclaw-config.workspace = true
+zeroclaw-runtime.workspace = true
+zeroclaw-tools.workspace = true
+zeroclaw-log.workspace = true
+zeroclaw-spawn.workspace = true
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+parking_lot = "0.12"
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1.50", features = ["rt", "sync", "time", "macros"] }
+tokio-util = "0.7"
+[dev-dependencies]
+zeroclaw-runtime = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+wiremock = "0.6"
+zeroclaw-memory.workspace = true

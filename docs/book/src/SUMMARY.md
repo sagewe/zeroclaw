@@ -145,6 +145,7 @@
   - [STM32 Nucleo](./hardware/nucleo-setup.md)
   - [Android](./hardware/android-setup.md)
   - [Raspberry Pi](./hardware/raspberry-pi-setup.md)
+- [Events](events/index.md)
 - [Standard Operating Procedures](./sop/index.md)
   - [How SOPs run](./sop/how-it-works.md)
   - [Syntax](./sop/syntax.md)

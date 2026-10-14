@@ -331,6 +331,11 @@ pub struct Config {
     #[nested]
     pub channels: ChannelsConfig,
 
+    /// Native event sources and SOP trigger rules.
+    #[serde(default)]
+    #[nested]
+    pub events: crate::events::EventsConfig,
+
     /// Memory backend configuration: sqlite, markdown, embeddings (`[memory]`).
     #[serde(default)]
     #[nested]
@@ -21146,6 +21151,7 @@ impl Default for Config {
             heartbeat: HeartbeatConfig::default(),
             cron: HashMap::new(),
             acp: AcpConfig::default(),
+            events: crate::events::EventsConfig::default(),
             channels: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -23953,6 +23959,13 @@ impl Config {
     /// Called after TOML deserialization and env-override application to catch
     /// obviously invalid values early instead of failing at arbitrary runtime points.
     pub fn validate(&self) -> Result<()> {
+        self.events.validate()?;
+        for id in self.events.rules.keys() {
+            anyhow::ensure!(
+                !self.channels.event_watch.contains_key(id),
+                "event rule conflicts with legacy channel alias"
+            );
+        }
         validate_memory_rerank_config(&self.memory)?;
         self.cost.rates.validate()?;
 
@@ -32975,6 +32988,7 @@ auto_save = true
             },
             cron: HashMap::new(),
             acp: AcpConfig::default(),
+            events: crate::events::EventsConfig::default(),
             channels: ChannelsConfig {
                 cli: true,
                 telegram: HashMap::from([(
@@ -34238,6 +34252,7 @@ default_temperature = 0.7
             heartbeat: HeartbeatConfig::default(),
             cron: HashMap::new(),
             acp: AcpConfig::default(),
+            events: crate::events::EventsConfig::default(),
             channels: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),

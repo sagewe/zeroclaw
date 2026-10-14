@@ -11,6 +11,7 @@ pub mod agent_owned_state;
 pub mod api;
 pub mod api_browse;
 pub mod api_config;
+pub mod api_events;
 pub mod api_logs;
 pub mod api_oidc;
 pub mod api_pairing;
@@ -853,6 +854,7 @@ impl GatewaySupervision {
 /// whatever its URL prefix.
 fn config_admin_router(inbound_auth: &Arc<principal_gate::GatewayInboundAuth>) -> Router<AppState> {
     Router::new()
+        .route("/api/event-monitor", put(api_events::put_events))
         .route(
             "/api/config",
             get(api_config::handle_config_get)
@@ -2228,6 +2230,8 @@ pub async fn run_gateway_with_plugin_webhooks(
             post(api_sop_author::handle_sop_rename),
         )
         .route("/api/sops/runs", get(api_sop_author::handle_sop_runs))
+        .route("/api/event-monitor", get(api_events::get_events))
+        .route("/api/event-monitor/simulate", post(api_events::simulate))
         .route(
             "/api/sops/{name}/full",
             get(api_sop_author::handle_sop_full),
