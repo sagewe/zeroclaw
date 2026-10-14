@@ -22,6 +22,7 @@ const sectionTitles: Record<string, string> = {
   tools: 'nav.tools',
   skills: 'nav.skills',
   cron: 'nav.cron',
+  events: 'nav.events',
   integrations: 'nav.integrations',
   config: 'nav.config',
   setup: 'nav.config',

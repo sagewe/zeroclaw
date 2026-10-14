@@ -151,7 +151,7 @@ pub async fn get_events(State(state): State<AppState>, headers: HeaderMap) -> Re
         records,
         sops,
         connections,
-        runtime_enabled: state.sop_engine.is_some(),
+        runtime_enabled: native_available(&state),
     })
     .into_response()
 }
@@ -195,6 +195,12 @@ pub async fn put_events(
         };
         if !watch.enabled {
             continue;
+        }
+        if !native_available(&state) {
+            return error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Native events require an event-enabled daemon with the SOP runtime",
+            );
         }
         let Some(engine) = &state.sop_engine else {
             return error(
@@ -263,10 +269,22 @@ pub async fn put_events(
     for path in &changed_paths {
         working.mark_dirty(path);
     }
-    if let Err(e) = crate::api_config::persist_and_swap(&state, authorization, working, guard).await
-    {
-        return e;
+    // This consumer applies event policy live. Preserve any unrelated pending
+    // reload while holding the retained writer through acknowledgement.
+    let already_pending = state
+        .pending_reload
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let committed =
+        match crate::api_config::persist_and_swap(&state, authorization, working, guard).await {
+            Ok(committed) => committed,
+            Err(e) => return e,
+        };
+    if !already_pending {
+        state
+            .pending_reload
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
+    drop(committed);
     Json(json!({"saved":true})).into_response()
 }
 
@@ -310,6 +328,12 @@ fn scrub_value(value: Value) -> Value {
         }
         other => other,
     }
+}
+
+fn native_available(state: &AppState) -> bool {
+    state.sop_engine.is_some()
+        && state.sop_driver_handles.is_some()
+        && zeroclaw_channels::listing::is_channel_type_compiled("event_watch")
 }
 
 #[cfg(test)]
@@ -382,6 +406,50 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert!(state.config.read().events.rules.is_empty());
+    }
+    #[tokio::test]
+    async fn live_event_write_preserves_only_preexisting_reload_requests() {
+        use zeroclaw_config::schema::{McpServerConfig, McpTransport};
+        for pending in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = crate::tests::admin_paircode_state(&dir, false, false);
+            let mut config = state.config.read().clone();
+            config.mcp.servers.push(McpServerConfig {
+                name: "mail".into(),
+                transport: McpTransport::Http,
+                url: Some("https://example.invalid/mcp".into()),
+                ..Default::default()
+            });
+            state.config_authority.publish_for_test(config.clone());
+            state
+                .pending_reload
+                .store(pending, std::sync::atomic::Ordering::Relaxed);
+            let rev = revision(&config.events).unwrap();
+            config.events.sources.insert(
+                "mail".into(),
+                zeroclaw_config::events::EventSource {
+                    mcp_server: "mail".into(),
+                    ..Default::default()
+                },
+            );
+            let response = put_events(
+                State(state.clone()),
+                None,
+                Json(EventsWrite {
+                    config: config.events,
+                    revision: rev,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                state
+                    .pending_reload
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                pending
+            );
+            assert!(state.config.read().events.sources.contains_key("mail"));
+        }
     }
     #[test]
     fn revision_detects_policy_changes_and_scrubs_event_content() {

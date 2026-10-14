@@ -14,7 +14,8 @@ import {
   X,
 } from "lucide-react";
 import { Badge, Button, Card, PageHeader } from "@/components/ui";
-import { useLocale } from "@/lib/i18n";
+import { tLocale, type Locale } from "@/lib/i18n";
+import { useLocaleContext } from "@/App";
 import {
   getEvents,
   saveEvents,
@@ -55,7 +56,8 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 export default function Events() {
-  const { t } = useLocale();
+  const { locale } = useLocaleContext();
+  const t = (key: string) => tLocale(key, locale as Locale);
   const { tab = "sources" } = useParams();
   const [params] = useSearchParams();
   const [data, setData] = useState<EventsState | null>(null);
