@@ -37,7 +37,7 @@ export default function IntegrationPlugins() {
     existing: boolean;
     binding: IntegrationBinding;
     revision: string;
-    approved: boolean;
+    approvedDigest: string | null;
   } | null>(null);
   const [template, setTemplate] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -129,7 +129,7 @@ export default function IntegrationPlugins() {
                       existing: false,
                       binding: { ...empty },
                       revision: data.revision,
-                      approved: false,
+                      approvedDigest: null,
                     })
                   }
                 >
@@ -234,7 +234,7 @@ export default function IntegrationPlugins() {
                             existing: true,
                             binding: { ...binding },
                             revision: data.revision,
-                            approved: false,
+                            approvedDigest: null,
                           })
                         }
                       >
@@ -317,16 +317,22 @@ export default function IntegrationPlugins() {
                   className="space-y-4"
                   onSubmit={(e) => {
                     e.preventDefault();
-                    if (!pkg?.sha256) return;
+                    if (
+                      !pkg?.sha256 ||
+                      (edit.approvedDigest ?? edit.binding.manifest_sha256) !==
+                        pkg.sha256 ||
+                      (!edit.existing && edit.id in data.config.instances)
+                    )
+                      return;
                     void save(
                       {
                         instances: {
                           ...data.config.instances,
                           [edit.id]: {
                             ...edit.binding,
-                            manifest_sha256: edit.approved
-                              ? pkg.sha256
-                              : edit.binding.manifest_sha256,
+                            manifest_sha256:
+                              edit.approvedDigest ??
+                              edit.binding.manifest_sha256,
                           },
                         },
                       },
@@ -360,7 +366,7 @@ export default function IntegrationPlugins() {
                             mcp_server: "",
                             manifest_sha256: "",
                           },
-                          approved: false,
+                          approvedDigest: null,
                         })
                       }
                     >
@@ -407,9 +413,14 @@ export default function IntegrationPlugins() {
                     <label className="flex items-start gap-2 text-sm">
                       <input
                         type="checkbox"
-                        checked={edit.approved}
+                        checked={edit.approvedDigest === pkg?.sha256}
                         onChange={(e) =>
-                          setEdit({ ...edit, approved: e.target.checked })
+                          setEdit({
+                            ...edit,
+                            approvedDigest: e.target.checked
+                              ? (pkg?.sha256 ?? null)
+                              : null,
+                          })
                         }
                       />
                       <span>
@@ -445,8 +456,9 @@ export default function IntegrationPlugins() {
                       busy ||
                       !edit.id ||
                       !pkg?.sha256 ||
-                      (!edit.approved &&
-                        pkg.sha256 !== edit.binding.manifest_sha256)
+                      (!edit.existing && edit.id in data.config.instances) ||
+                      (edit.approvedDigest ?? edit.binding.manifest_sha256) !==
+                        pkg.sha256
                     }
                   >
                     {t("events.save")}
