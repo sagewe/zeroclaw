@@ -117,9 +117,7 @@ impl EventsConfig {
             );
             ensure!(
                 if source.kind == "plugin" {
-                    valid_id(&source.plugin)
-                        && source.mcp_server.is_empty()
-                        && source.entities.is_empty()
+                    valid_id(&source.plugin) && source.mcp_server.is_empty()
                 } else {
                     !source.mcp_server.is_empty() && source.plugin.is_empty()
                 },
@@ -129,16 +127,17 @@ impl EventsConfig {
                 (10..=3600).contains(&source.poll_interval_secs),
                 "poll interval must be 10..=3600 seconds"
             );
-            ensure!(source.query.len() <= 2048, "event query too long");
+            ensure!(
+                source.query.len() <= 2048 && source.entities.len() <= 128,
+                "event scope too large"
+            );
         }
         for id in self.rules.keys() {
             ensure!(valid_id(id), "invalid event rule id");
             let mut view = self.watch(id)?;
             if view.source == "plugin" {
-                ensure!(
-                    view.states.is_empty() && view.above.is_none() && view.below.is_none(),
-                    "mail integration does not support device conditions"
-                );
+                // Base shape validation only. Config::event_watch resolves the package's
+                // canonical adapter and validates its entity/condition contract before use.
                 view.source = "fastmail".into();
                 view.mcp_server = "integration-binding".into();
             }

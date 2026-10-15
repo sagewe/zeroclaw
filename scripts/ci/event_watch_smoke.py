@@ -5,6 +5,9 @@ Usage: python3 scripts/ci/event_watch_smoke.py --binary target/debug/zeroclaw
 Build with channel-event-watch and gateway. No real accounts or external model calls.
 """
 import argparse
+import base64
+import select
+import struct
 import hashlib
 from datetime import datetime, timezone
 import json
@@ -28,13 +31,16 @@ def main():
     parser.add_argument("--native", action="store_true")
     parser.add_argument("--plugin", action="store_true", help="Exercise the Fastmail integration package")
     parser.add_argument("--push", action="store_true", help="Exercise JMAP SSE wake-ups without mail polling")
+    parser.add_argument("--home-push", action="store_true", help="Exercise filtered Home Assistant entity push")
     args = parser.parse_args()
+    if args.home_push:
+        args.plugin = True
     if args.push:
         args.plugin = True
     if args.plugin:
         args.native = True
     binary = args.binary.resolve()
-    state = {"value": "on", "reads": 0, "model_calls": 0, "unexpected": [], "push_revision":0, "push_connections":0, "disconnect":0, "stop":False}
+    state = {"value": "on", "reads": 0, "model_calls": 0, "unexpected": [], "push_revision":0, "push_connections":0, "disconnect":0, "stop":False, "rest_reads":0}
 
     class Fixture(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -48,7 +54,61 @@ def main():
             self.end_headers()
             self.wfile.write(data)
 
+        def home_websocket(self):
+            key = self.headers["Sec-WebSocket-Key"]
+            accept = base64.b64encode(hashlib.sha1((key+"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.end_headers()
+            def send(value):
+                payload = json.dumps(value).encode()
+                prefix = bytes([0x81, len(payload)]) if len(payload)<126 else bytes([0x81,126])+struct.pack("!H",len(payload))
+                self.connection.sendall(prefix+payload)
+            def exact(n):
+                out=b""
+                while len(out)<n:
+                    chunk=self.connection.recv(n-len(out))
+                    if not chunk: raise EOFError()
+                    out+=chunk
+                return out
+            def receive():
+                head=exact(2)
+                if head[0]&15 == 8: raise EOFError()
+                assert head[0]&15 == 1 and head[1]&128, "expected masked client text"
+                size=head[1]&127
+                if size==126: size=struct.unpack("!H",exact(2))[0]
+                if size==127: size=struct.unpack("!Q",exact(8))[0]
+                assert size<=65536
+                mask=exact(4);body=exact(size)
+                return json.loads(bytes(v^mask[i%4] for i,v in enumerate(body)))
+            try:
+                send({"type":"auth_required"})
+                auth=receive();assert auth=={"type":"auth","access_token":"fixture-not-a-real-token"}
+                send({"type":"auth_ok"})
+                sub=receive();assert sub=={"id":1,"type":"subscribe_entities","entity_ids":["light.example"]}
+                send({"id":1,"type":"result","success":True,"result":None})
+                current=state["value"]
+                send({"id":1,"type":"event","event":{"a":{"light.example":{"s":current,"a":{"private":"drop attributes"}},"camera.private":{"s":"on"}}}})
+                state["reads"]+=1;state["push_connections"]+=1
+                disconnected=state["disconnect"]
+                while not state["stop"] and state["disconnect"]==disconnected:
+                    if current!=state["value"]:
+                        current=state["value"]
+                        send({"id":1,"type":"event","event":{"c":{"light.example":{"+":{"s":current}}}}})
+                        state["reads"]+=1
+                    if select.select([self.connection],[],[],0.05)[0]:
+                        msg=receive();assert msg["type"]=="ping", "only heartbeat commands are allowed after subscription"
+                        send({"id":msg["id"],"type":"pong"})
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except (EOFError, BrokenPipeError, ConnectionResetError):
+                pass
+
         def do_GET(self):
+            if args.home_push and self.path == "/api/websocket":
+                self.home_websocket()
+                return
             if args.push and self.path == "/jmap/session":
                 assert self.headers.get("Authorization") == "Bearer fixture-push-token"
                 self.reply({"primaryAccounts":{"urn:ietf:params:jmap:mail":"fixture"}, "eventSourceUrl":f"http://127.0.0.1:{self.server.server_port}/jmap/event"})
@@ -79,6 +139,7 @@ def main():
                 self.reply({"data": [{"id": "fixture"}]})
                 return
             if self.path == "/api/states/light.example":
+                state["rest_reads"] += 1
                 state["reads"] += 1
                 self.reply({"entity_id": "light.example", "state": state["value"]})
             else:
@@ -94,7 +155,7 @@ def main():
                 self.reply({"choices": [{"message": {"role": "assistant", "content": "fixture ready"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 0, "completion_tokens": 0}})
                 return
             method = request.get("method")
-            if self.path != "/mcp":
+            if self.path not in ("/mcp", "/api/mcp"):
                 state["unexpected"].append(self.path)
                 self.reply({}, 404)
                 return
@@ -105,8 +166,8 @@ def main():
             if method == "initialize":
                 result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "fixture", "version": "1"}}
             elif method == "tools/list":
-                result = {"tools": [{"name":"search_email", "description":"Fixture metadata", "inputSchema":{"type":"object"}}] if args.plugin else []}
-            elif method == "tools/call" and args.plugin:
+                result = {"tools": [{"name":"homeassistant__GetLiveContext" if args.home_push else "search_email", "description":"Fixture metadata", "inputSchema":{"type":"object"}}] if args.plugin else []}
+            elif method == "tools/call" and args.plugin and not args.home_push:
                 assert request["params"]["name"] == "search_email"
                 assert request["params"]["arguments"]["query"] == "in:inbox"
                 state["reads"] += 1
@@ -204,7 +265,7 @@ enabled = false
             start = config.index('[channels.event_watch.fixture]')
             end = config.index('[[mcp.servers]]', start)
             config = config[:start] + '[events.sources.ha]\nenabled = true\nkind = "home_assistant"\nmcp_server = "fixture"\npoll_interval_secs = 10\nentities = ["light.example"]\n[events.rules.fixture]\nenabled = true\nsource = "ha"\nsop = "review"\nstates = ["unavailable"]\nfor_secs = 0\ncooldown_secs = 0\n' + config[end:]
-            if args.plugin:
+            if args.plugin and not args.home_push:
                 package = root / "shared/integration-plugins/fastmail"
                 package.mkdir(parents=True)
                 manifest = (Path(__file__).resolve().parents[2] / "crates/zeroclaw-config/integrations/fastmail/integration.toml").read_text().replace("https://api.fastmail.com", f"http://127.0.0.1:{fixture.server_port}").replace("https://phl.api.fastmail.com", f"http://127.0.0.1:{fixture.server_port}")
@@ -230,6 +291,35 @@ sop = "review"
 ''' + config[end:]
             if args.push:
                 config = config.replace('[integration_plugins.instances.mail]', '[integration_plugins.instances.mail]\npush_enabled = true\npush_token = "fixture-push-token"')
+            if args.home_push:
+                package = root / "shared/integration-plugins/homeassistant"
+                package.mkdir(parents=True)
+                manifest = (Path(__file__).resolve().parents[2] / "crates/zeroclaw-config/integrations/homeassistant/integration.toml").read_text()
+                (package / "integration.toml").write_text(manifest)
+                digest = hashlib.sha256(manifest.encode()).hexdigest()
+                config = config.replace('[risk_profiles.observer]', '[risk_profiles.observer]\nauto_approve = ["fixture__homeassistant__GetLiveContext"]')
+                config = config.replace(f'url = "http://127.0.0.1:{fixture.server_port}/mcp"', f'url = "http://127.0.0.1:{fixture.server_port}/api/mcp"')
+                start=config.index('[events.sources.ha]');end=config.index('[[mcp.servers]]',start)
+                config=config[:start]+f'''[integration_plugins.instances.homeassistant]
+enabled = true
+package = "homeassistant"
+manifest_sha256 = "{digest}"
+mcp_server = "fixture"
+push_enabled = true
+[events.sources.ha]
+enabled = true
+kind = "plugin"
+plugin = "homeassistant"
+entities = ["light.example"]
+poll_interval_secs = 10
+[events.rules.fixture]
+enabled = true
+source = "ha"
+sop = "review"
+states = ["unavailable"]
+for_secs = 1
+cooldown_secs = 0
+'''+config[end:]
             path.write_text(config)
         env = {k: v for k, v in os.environ.items() if not k.startswith("ZEROCLAW_")}
         env["NO_PROXY"] = "127.0.0.1,localhost"
@@ -275,9 +365,9 @@ sop = "review"
                         continue
                     if row:
                         checkpoint = json.loads(row[0])
-                        if args.plugin and checkpoint.get("mail_boundary") is not None:
+                        if args.plugin and not args.home_push and checkpoint.get("mail_boundary") is not None:
                             return True
-                        if not args.plugin and checkpoint.get("home", {}).get("light.example", {}).get("state") == "on":
+                        if (not args.plugin or args.home_push) and checkpoint.get("home", {}).get("light.example", {}).get("state") == "on":
                             return True
             return False
 
@@ -285,7 +375,7 @@ sop = "review"
             with log_path.open("a") as log:
                 process = start()
                 wait_until(baseline_committed)
-                if args.push:
+                if args.push or args.home_push:
                     idle_reads = state["reads"]
                     time.sleep(11)
                     assert state["reads"] == idle_reads, "idle SSE connection polled mail"
@@ -315,12 +405,12 @@ sop = "review"
                     auth = {"Authorization":"Bearer " + token}
                     overview = api("/api/event-monitor", headers=auth)
                     assert overview["rules"][0]["last_poll_ms"] is not None
-                    assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"on","duration_secs":100}, auth)["matched"] is args.plugin
+                    assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"on","duration_secs":100}, auth)["matched"] is (args.plugin and not args.home_push)
                     assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"unavailable","duration_secs":100}, auth)["matched"] is True
                     assert not runs(), "simulation started a SOP"
                     endpoint = "/api/integration-plugins" if args.plugin else "/api/event-monitor"
                     setting = "instances" if args.plugin else "sources"
-                    instance = "mail" if args.plugin else "ha"
+                    instance = "homeassistant" if args.home_push else ("mail" if args.plugin else "ha")
                     overview = api(endpoint, headers=auth)
                     if args.push:
                         assert overview["config"]["instances"]["mail"]["push_token"] is None
@@ -349,7 +439,7 @@ sop = "review"
                 state["push_revision"] += 1
                 wait_until(lambda: any(r.get("status") == "completed" for r in runs()))
                 assert len(runs()) == 1
-                if args.push:
+                if args.push or args.home_push:
                     assert time.monotonic()-pushed_at < 5, "SSE did not promptly wake the observer"
                 if args.native:
                     records = api("/api/event-monitor", headers=auth)["records"]
@@ -357,7 +447,7 @@ sop = "review"
                     assert records[0]["run_id"] == runs()[0]["run_id"]
                     assert records[0]["run_status"] == "completed"
                 assert state["model_calls"] == warmed_up_calls, "event observer unexpectedly called a model"
-                if args.push:
+                if args.push or args.home_push:
                     connected = state["push_connections"]
                     reads_before_disconnect = state["reads"]
                     state["disconnect"] += 1
@@ -369,21 +459,23 @@ sop = "review"
                 process = start()
                 # The second read proves the first post-restart cycle finished;
                 # observing request arrival alone races its eventual dispatch.
-                wait_until(lambda: state["reads"] >= before + (1 if args.push else 2))
-                if args.push:
+                wait_until(lambda: state["reads"] >= before + (1 if args.push or args.home_push else 2))
+                if args.push or args.home_push:
                     time.sleep(3)
                 assert len(runs()) == 1, "restart replayed a delivered event"
                 assert not state["unexpected"], state["unexpected"]
                 if args.plugin:
-                    package_file = root / "shared/integration-plugins/fastmail/integration.toml"
+                    package_file = root / "shared/integration-plugins" / ("homeassistant" if args.home_push else "fastmail") / "integration.toml"
                     package_file.write_text(package_file.read_text() + "\n# unapproved change\n")
                     time.sleep(3)
                     paused_reads = state["reads"]
                     time.sleep(11)
                     assert state["reads"] == paused_reads, "unapproved package kept polling"
                     catalog = api("/api/integration-plugins", headers=auth)
-                    assert "mail" in catalog["invalid_instances"]
-                print("PASS: daemon baseline -> pause/resume -> event -> completed SOP -> restart without replay" + (" -> tamper stops observation" if args.plugin else "") + (" (SSE: no idle polling, prompt wake-up, reconnect, secret redaction)" if args.push else ""))
+                    assert ("homeassistant" if args.home_push else "mail") in catalog["invalid_instances"]
+                if args.home_push:
+                    assert state["rest_reads"] == 0, "Home Assistant push performed REST state polling"
+                print("PASS: daemon baseline -> pause/resume -> event -> completed SOP -> restart without replay" + (" -> tamper stops observation" if args.plugin else "") + (" (SSE: no idle polling, prompt wake-up, reconnect, secret redaction)" if args.push else "") + (" (HA WebSocket: scoped snapshot, no REST polling, duration timer, reconnect)" if args.home_push else ""))
         except Exception:
             print(diagnostic())
             if log_path.exists():

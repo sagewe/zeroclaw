@@ -649,7 +649,7 @@ async fn integration_manifest_drives_wire_tool_arguments_and_projection() {
         };
         ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0","id":req["id"],"result":result}))
     }).mount(&server).await;
-    let mut spec = bundled_fastmail().unwrap().event;
+    let mut spec = bundled_fastmail().unwrap().event.into_mail().unwrap();
     spec.tool = "find_messages".into();
     spec.query_argument = "filter".into();
     spec.limit_argument = "count".into();
@@ -719,7 +719,9 @@ async fn integration_migration_preserves_checkpoint_and_pause_blocks_queued_disp
     let path = package_root(&config).join("fastmail");
     std::fs::create_dir_all(&path).unwrap();
     let mut manifest = bundled_fastmail().unwrap();
-    manifest.mcp.url = "https://example.invalid/mcp".into();
+    manifest.mcp = zeroclaw_config::integration_plugins::RemoteMcp::Absolute {
+        url: "https://example.invalid/mcp".into(),
+    };
     // Serialize through JSON -> TOML is unnecessary: use the canonical package bytes and replace only fixture endpoint.
     let bytes = include_str!("../../zeroclaw-config/integrations/fastmail/integration.toml")
         .replace("https://api.fastmail.com", "https://example.invalid");
@@ -805,4 +807,100 @@ fn bundled_integration_template_loads_with_narrow_step_permissions() {
         sops[0].steps[1].scope.as_ref().unwrap().allow,
         Some(vec!["send_via".into()])
     );
+}
+
+#[tokio::test]
+async fn home_plugin_preserves_legacy_identity_and_requires_live_read_permission() {
+    use zeroclaw_config::{
+        events::{EventRule, EventSource},
+        integration_plugins::{IntegrationBinding, load_package, package_root},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (observer, authority) = harness(dir.path());
+    let mut config = authority.snapshot_config();
+    config.config_path = dir.path().join("config.toml");
+    config.mcp.servers[0].url = Some("https://example.invalid/api/mcp".into());
+    config.mcp.servers[0]
+        .headers
+        .insert("Authorization".into(), "Bearer fixture".into());
+    config.agents.get_mut("observer").unwrap().risk_profile = "observer".into();
+    config.risk_profiles.insert(
+        "observer".into(),
+        zeroclaw_config::schema::RiskProfileConfig {
+            auto_approve: vec!["fixture__homeassistant__GetLiveContext".into()],
+            ..Default::default()
+        },
+    );
+    authority.publish_for_test(config.clone());
+    let (_, _, legacy, _) = observer.resolve().unwrap();
+    let path = package_root(&config).join("homeassistant");
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(
+        path.join("integration.toml"),
+        include_str!("../../zeroclaw-config/integrations/homeassistant/integration.toml"),
+    )
+    .unwrap();
+    let (_, digest) = load_package(&package_root(&config), "homeassistant").unwrap();
+    config.integration_plugins.instances.insert(
+        "home".into(),
+        IntegrationBinding {
+            enabled: true,
+            package: "homeassistant".into(),
+            manifest_sha256: digest,
+            mcp_server: "fixture".into(),
+            push_enabled: true,
+            ..Default::default()
+        },
+    );
+    config.channels.event_watch.clear();
+    config.events.sources.insert(
+        "home".into(),
+        EventSource {
+            enabled: true,
+            kind: "plugin".into(),
+            plugin: "home".into(),
+            entities: vec!["light.example".into()],
+            ..Default::default()
+        },
+    );
+    config.events.rules.insert(
+        "fixture".into(),
+        EventRule {
+            enabled: true,
+            source: "home".into(),
+            sop: "review".into(),
+            states: vec!["unavailable".into()],
+            for_secs: 10,
+            cooldown_secs: 30,
+            ..Default::default()
+        },
+    );
+    authority.publish_for_test(config.clone());
+    let (_, _, revision, _) = observer.resolve().unwrap();
+    assert_eq!(legacy, revision);
+    let store = Store::open(dir.path()).unwrap();
+    let cp = Checkpoint {
+        revision,
+        ..Default::default()
+    };
+    store
+        .save(
+            &cp,
+            &[cp.event(
+                "condition_entered",
+                1000,
+                json!({"entity_id":"light.example","state":"unavailable"}),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+    config
+        .risk_profiles
+        .get_mut("observer")
+        .unwrap()
+        .auto_approve
+        .clear();
+    authority.publish_for_test(config);
+    assert!(observer.drain(&store).await.is_err());
+    assert!(store.next().unwrap().is_some());
 }

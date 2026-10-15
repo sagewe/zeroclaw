@@ -18,6 +18,9 @@ import {
   type IntegrationBinding,
   type IntegrationConfig,
 } from "@/lib/integrationPlugins";
+const homePackage = (
+  manifest: IntegrationCatalog["packages"][number]["manifest"],
+) => manifest?.event.adapter === "home_assistant_state_v1";
 const input =
   "w-full rounded-lg border border-pc-border bg-pc-base px-3 py-2 text-sm text-pc-text";
 const empty: IntegrationBinding = {
@@ -196,7 +199,9 @@ export default function IntegrationPlugins() {
                         <p className="mt-1 text-xs text-pc-text-secondary">
                           {t(
                             binding.push_enabled
-                              ? "integrations_plugin.push_mode"
+                              ? homePackage(p?.manifest ?? null)
+                                ? "integrations_plugin.home_push_mode"
+                                : "integrations_plugin.push_mode"
                               : "integrations_plugin.polling",
                           )}
                         </p>
@@ -289,10 +294,20 @@ export default function IntegrationPlugins() {
                   </p>
                   {p.manifest && (
                     <p className="text-xs text-pc-text-secondary">
-                      MCP: {p.manifest.mcp.url}
+                      MCP:{" "}
+                      {"url" in p.manifest.mcp
+                        ? p.manifest.mcp.url
+                        : p.manifest.mcp.path}
                       <br />
-                      {t("integrations_plugin.poll_tool")}:{" "}
-                      {p.manifest.event.tool}
+                      {t(
+                        homePackage(p.manifest)
+                          ? "integrations_plugin.read_permission"
+                          : "integrations_plugin.poll_tool",
+                      )}
+                      :{" "}
+                      {"tool" in p.manifest.event
+                        ? p.manifest.event.tool
+                        : p.manifest.event.permission_tool}
                     </p>
                   )}
                   <code className="block break-all text-[11px] text-pc-text-muted">
@@ -431,33 +446,43 @@ export default function IntegrationPlugins() {
                             })
                           }
                         />
-                        {t("integrations_plugin.push_mode")}
+                        {t(
+                          homePackage(pkg.manifest)
+                            ? "integrations_plugin.home_push_mode"
+                            : "integrations_plugin.push_mode",
+                        )}
                       </label>
-                      <label className="block text-sm space-y-1">
-                        <span>{t("integrations_plugin.push_token")}</span>
-                        <input
-                          type="password"
-                          autoComplete="new-password"
-                          className={input}
-                          value={edit.binding.push_token ?? ""}
-                          onChange={(e) =>
-                            setEdit({
-                              ...edit,
-                              binding: {
-                                ...edit.binding,
-                                push_token: e.target.value || null,
-                              },
-                            })
-                          }
-                          placeholder={t(
-                            data.push_credentials_configured.includes(edit.id)
-                              ? "integrations_plugin.token_saved"
-                              : "integrations_plugin.token_missing",
-                          )}
-                        />
-                      </label>
+                      {!homePackage(pkg.manifest) && (
+                        <label className="block text-sm space-y-1">
+                          <span>{t("integrations_plugin.push_token")}</span>
+                          <input
+                            type="password"
+                            autoComplete="new-password"
+                            className={input}
+                            value={edit.binding.push_token ?? ""}
+                            onChange={(e) =>
+                              setEdit({
+                                ...edit,
+                                binding: {
+                                  ...edit.binding,
+                                  push_token: e.target.value || null,
+                                },
+                              })
+                            }
+                            placeholder={t(
+                              data.push_credentials_configured.includes(edit.id)
+                                ? "integrations_plugin.token_saved"
+                                : "integrations_plugin.token_missing",
+                            )}
+                          />
+                        </label>
+                      )}
                       <p className="text-xs text-pc-text-secondary">
-                        {t("integrations_plugin.push_hint")}
+                        {t(
+                          homePackage(pkg.manifest)
+                            ? "integrations_plugin.home_push_hint"
+                            : "integrations_plugin.push_hint",
+                        )}
                       </p>
                     </div>
                   )}

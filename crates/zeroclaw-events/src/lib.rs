@@ -3,6 +3,7 @@
 //! No LLM runs in the poll loop. Events enter the shared, untrusted Channel SOP
 //! ingress and its generation-owned driver. Live config owns permissions and
 //! filters; events.db owns observations and delivery admission, never SOP state.
+mod home_push;
 mod push;
 pub mod service;
 mod sources;
@@ -24,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use zeroclaw_api::channel::{Channel, ChannelMessage, ChannelSopTopic, SendMessage};
 use zeroclaw_config::event_watch::EventWatchConfig;
-use zeroclaw_config::integration_plugins::{MailPollSpec, bundled_fastmail};
+use zeroclaw_config::integration_plugins::{EventPushConfig, MailPollSpec, bundled_fastmail};
 use zeroclaw_config::live::LiveConfigHandle;
 use zeroclaw_config::schema::{McpServerConfig, McpTransport};
 use zeroclaw_runtime::sop::SopDriverSink;
@@ -171,11 +172,14 @@ impl EventWatchChannel {
         if native
             && config.events.sources[&config.events.rules[&self.alias].source].kind == "plugin"
         {
-            let spec = mail_spec
-                .as_ref()
-                .context("integration mail adapter missing")?;
+            let source = &config.events.sources[&config.events.rules[&self.alias].source];
+            let manifest = config.integration_manifest(&source.plugin)?;
             ensure!(
-                config.integration_poll_allowed(&owner, &watch.mcp_server, &spec.tool),
+                config.integration_poll_allowed(
+                    &owner,
+                    &watch.mcp_server,
+                    manifest.event.permission_tool()
+                ),
                 "integration poll tool must be explicitly auto-approved by the owning agent"
             );
         }
@@ -187,7 +191,7 @@ impl EventWatchChannel {
         // Preserve the existing Fastmail checkpoint during migration when the
         // wire mapping is unchanged. Other approved mappings own a new cursor.
         if let Some(spec) = &mail_spec
-            && *spec != bundled_fastmail()?.event
+            && *spec != bundled_fastmail()?.event.into_mail()?
         {
             revision = hex::encode(Sha256::digest(serde_json::to_vec(&(&revision, spec))?));
         }
@@ -296,7 +300,7 @@ impl EventWatchChannel {
                 biased;
                 _ = policy_tick.tick() => {
                     let (_, _, current_revision, _) = self.resolve()?;
-                    ensure!(current_revision == revision && self.live.read().event_push(&self.alias)?.as_ref() == Some(&settings), "JMAP push policy changed; reconnect required");
+                    ensure!(current_revision == revision && self.live.read().event_push(&self.alias)?.as_ref() == Some(&EventPushConfig::Jmap(settings.0.clone(), settings.1.clone())), "JMAP push policy changed; reconnect required");
                     ensure!(activity.elapsed() < Duration::from_secs(90), "JMAP push heartbeat timed out");
                     self.drain(store).await?;
                 }
@@ -355,11 +359,7 @@ impl Channel for EventWatchChannel {
         let store = Store::open(&self.directory)?;
         let mut checkpoint = store.load()?;
         // Restart time is not evidence that a condition stayed continuously true.
-        for observation in checkpoint.home.values_mut() {
-            if observation.since.is_some() {
-                observation.since = Some(Utc::now().timestamp_millis());
-            }
-        }
+        checkpoint.reset_home_continuity(Utc::now().timestamp_millis());
         let uncertain = store.uncertain_count()?;
         if uncertain > 0 {
             ::zeroclaw_log::record!(
@@ -370,8 +370,16 @@ impl Channel for EventWatchChannel {
             );
         }
         let push = { self.live.read().event_push(&self.alias)? };
-        if let Some(settings) = push {
-            return self.listen_push(&store, &mut checkpoint, settings).await;
+        match push {
+            Some(EventPushConfig::Jmap(spec, token)) => {
+                return self
+                    .listen_push(&store, &mut checkpoint, (spec, token))
+                    .await;
+            }
+            Some(EventPushConfig::HomeAssistant) => {
+                return self.listen_home_push(&store, &mut checkpoint).await;
+            }
+            None => {}
         }
         loop {
             self.observe_once(&store, &mut checkpoint).await?;

@@ -27,6 +27,7 @@ pub struct EventsResponse {
     pub connections: Vec<String>,
     pub runtime_enabled: bool,
     pub integration_instances: Vec<String>,
+    pub integration_kinds: std::collections::BTreeMap<String, String>,
     pub resolved_sources: std::collections::BTreeMap<String, Value>,
 }
 #[derive(Deserialize)]
@@ -152,12 +153,24 @@ pub async fn get_events(State(state): State<AppState>, headers: HeaderMap) -> Re
         .keys()
         .cloned()
         .collect();
+    let integration_kinds = config
+        .integration_plugins
+        .instances
+        .keys()
+        .filter_map(|id| {
+            config
+                .integration_manifest(id)
+                .ok()
+                .map(|m| (id.clone(), m.event.kind().to_owned()))
+        })
+        .collect();
     let resolved_sources=config.events.sources.iter().map(|(id,source)| {
         let binding=config.integration_plugins.instances.get(&source.plugin);
-        let valid=source.kind!="plugin" || config.integration_manifest(&source.plugin).is_ok();
+        let manifest = if source.kind == "plugin" { config.integration_manifest(&source.plugin).ok() } else { None };
+        let valid=source.kind!="plugin" || manifest.is_some();
         let enabled=source.enabled && (source.kind!="plugin" || binding.is_some_and(|b|b.enabled) && valid);
         let connection=if source.kind=="plugin" {binding.map(|b|b.mcp_server.as_str()).unwrap_or("")}else{&source.mcp_server};
-        (id.clone(),json!({"kind":if source.kind=="plugin" {"fastmail"}else{source.kind.as_str()},"enabled":enabled,"mcp_server":connection,"valid":valid,"push":source.kind=="plugin" && binding.is_some_and(|b|b.push_enabled)}))
+        (id.clone(),json!({"kind":manifest.as_ref().map(|m|m.event.kind()).unwrap_or(source.kind.as_str()),"enabled":enabled,"mcp_server":connection,"valid":valid,"push":source.kind=="plugin" && binding.is_some_and(|b|b.push_enabled)}))
     }).collect();
     Json(EventsResponse {
         config: config.events,
@@ -168,6 +181,7 @@ pub async fn get_events(State(state): State<AppState>, headers: HeaderMap) -> Re
         connections,
         runtime_enabled: native_available(&state),
         integration_instances,
+        integration_kinds,
         resolved_sources,
     })
     .into_response()
@@ -257,11 +271,16 @@ pub async fn put_events(
             );
         }
         if working.events.sources[&working.events.rules[id].source].kind == "plugin" {
-            let spec = match working.event_mail_spec(id) {
+            let source = &working.events.sources[&working.events.rules[id].source];
+            let manifest = match working.integration_manifest(&source.plugin) {
                 Ok(s) => s,
                 Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
             };
-            if !working.integration_poll_allowed(owner, &watch.mcp_server, &spec.tool) {
+            if !working.integration_poll_allowed(
+                owner,
+                &watch.mcp_server,
+                manifest.event.permission_tool(),
+            ) {
                 return error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "SOP owner must explicitly auto-approve the integration polling tool",

@@ -116,7 +116,7 @@ pub async fn get(State(state): State<AppState>, headers: HeaderMap) -> Response 
                 .filter(|p| {
                     p.manifest
                         .as_ref()
-                        .is_some_and(|m| s.url.as_deref() == Some(m.mcp.url.as_str()))
+                        .is_some_and(|m| m.mcp.matches(s.url.as_deref()))
                 })
                 .map(|p| p.package.clone())
                 .collect(),
@@ -187,12 +187,17 @@ pub async fn put(
     }
     for (id, binding) in &working.integration_plugins.instances {
         if binding.enabled {
+            if binding.push_enabled {
+                if let Err(e) = working.integration_push(id) {
+                    return error(StatusCode::UNPROCESSABLE_ENTITY, e);
+                }
+            }
             match working.integration_manifest(id) {
                 Ok(manifest) if !binding.push_enabled || manifest.push.is_some() => {}
                 Ok(_) => {
                     return error(
                         StatusCode::UNPROCESSABLE_ENTITY,
-                        "Package does not declare JMAP push",
+                        "Package does not declare push",
                     );
                 }
                 Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),

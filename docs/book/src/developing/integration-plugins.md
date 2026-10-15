@@ -1,7 +1,8 @@
 # Declarative integration plugins
 
 A service integration package groups an existing remote MCP connection, an event
-protocol mapping, and an optional SOP template. Fastmail is the first sample.
+protocol mapping, and an optional SOP template. Fastmail and Home Assistant are
+the included samples.
 This is a bounded declarative extension of the native event observer, separate
 from executable WASM plugins and their `manifest.toml` protocol.
 
@@ -141,3 +142,80 @@ The push fixture additionally verifies no idle mail polling, a prompt state-chan
 wake-up, reconnect catch-up, persisted enable/disable, and credential redaction.
 The mail checkpoint fingerprint depends on the metadata mapping and MCP account,
 not the delivery transport or push token, so selecting SSE preserves deduplication.
+
+## Home Assistant package
+
+The `homeassistant` package adds `home_assistant_state_v1` with
+`home_assistant_websocket_v1` push. Install its `integration.toml` from
+`crates/zeroclaw-config/integrations/homeassistant/` alongside the Fastmail package.
+Its MCP selector is the relative path `/api/mcp`: the existing bound server owns
+the host, port, TLS choice, and encrypted Authorization header. No address or token
+is copied into the package, and no separate push token is required.
+
+The connection derives `/api/websocket` on that same host, authenticates using
+the existing bearer credential, and calls `subscribe_entities` with the explicit
+entity IDs from the event source. An empty scope is rejected before connecting:
+Home Assistant interprets an empty subscription list as all entities. The host
+also filters inbound frames to that scope and retains only entity IDs and states,
+never attributes, camera data, or unrelated entities. This subscription returns
+an ordered initial snapshot and deltas, avoiding the race between separately
+reading states and starting a subscription. See the [WebSocket API](https://developers.home-assistant.io/docs/api/websocket/)
+and the [official filtered subscription implementation](https://github.com/home-assistant/core/blob/dev/homeassistant/components/websocket_api/commands.py).
+
+The owning agent must have the bound MCP bundle and explicitly auto-approve the
+package's read permission, currently `<server>__homeassistant__GetLiveContext`.
+Deny-all, exclusions, and approval-required overrides take precedence. This does
+not grant appliance control. Other MCP connections, including independently
+scoped control helpers, retain their own grants.
+
+```toml
+[integration_plugins.instances.home]
+enabled = true
+package = "homeassistant"
+manifest_sha256 = "<SHA-256 of the exact homeassistant integration.toml bytes>"
+mcp_server = "home"
+push_enabled = true
+
+[events.sources.home]
+enabled = true
+kind = "plugin"
+plugin = "home"
+entities = ["light.example"]
+
+[events.rules.home-offline]
+enabled = true
+source = "home"
+sop = "observe-home-state"
+states = ["unavailable", "unknown"]
+for_secs = 60
+cooldown_secs = 300
+```
+
+Install the package's optional deterministic `observe-home-state` SOP template,
+replacing its agent and rule placeholders. It records conditions without invoking
+a model, controlling devices, or sending messages. Notification and action SOPs
+remain operator-authored policy. The dashboard derives the correct entity and
+condition editors from the package adapter, and shows WebSocket activity instead
+of a polling interval.
+
+While connected, only state deltas and application ping/pong messages are used;
+there is no REST state polling. A local timer checks pending duration conditions
+against the canonical checkpoint. A due condition is evaluated after a successful
+application pong, following any state changes already queued by Home Assistant.
+On reconnect, pending duration measurement starts again after subscription setup;
+time spent disconnected is not evidence of continuity. Already-settled conditions
+are not emitted again merely because the stream reconnects. Missing or removed
+entities are projected as `unavailable`. Initial setup establishes a baseline.
+
+The package switch and live bundle/read-permission revocation stop observation
+and queued admission. Migration from an equivalent legacy Home Assistant source
+preserves checkpoint identity. The transport reuses the existing WebSocket and
+TLS dependencies. Verify its daemon boundary with:
+
+```sh
+python3 scripts/ci/event_watch_smoke.py --binary target/release/zeroclaw --home-push
+```
+
+This loopback fixture checks the scoped snapshot, ignored foreign entities, no
+REST polling, timed conditions, persisted pause/resume, reconnection and restart
+without replay. It does not change a physical device or send a notification.

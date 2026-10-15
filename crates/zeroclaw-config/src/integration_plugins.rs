@@ -49,11 +49,80 @@ pub struct IntegrationManifest {
     pub title: String,
     pub description: String,
     pub mcp: RemoteMcp,
-    pub event: MailPollSpec,
+    pub event: IntegrationEventSpec,
     pub template: SopTemplate,
     #[serde(default)]
-    pub push: Option<JmapPushSpec>,
+    pub push: Option<IntegrationPushSpec>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum IntegrationEventSpec {
+    Mail(Box<MailPollSpec>),
+    HomeAssistant(HomeStateSpec),
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HomeStateSpec {
+    pub adapter: String,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub permission_tool: String,
+}
+impl IntegrationEventSpec {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Mail(_) => "fastmail",
+            Self::HomeAssistant(_) => "home_assistant",
+        }
+    }
+    pub fn permission_tool(&self) -> &str {
+        match self {
+            Self::Mail(spec) => &spec.tool,
+            Self::HomeAssistant(spec) => &spec.permission_tool,
+        }
+    }
+    pub fn into_mail(self) -> Result<MailPollSpec> {
+        match self {
+            Self::Mail(spec) => Ok(*spec),
+            Self::HomeAssistant(_) => anyhow::bail!("integration is not a mail adapter"),
+        }
+    }
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Mail(spec) => spec.validate(),
+            Self::HomeAssistant(spec) => {
+                ensure!(
+                    spec.adapter == "home_assistant_state_v1"
+                        && spec.event_type == "condition_entered"
+                        && valid_id(&spec.permission_tool),
+                    "invalid Home Assistant state adapter"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum IntegrationPushSpec {
+    Jmap(JmapPushSpec),
+    HomeAssistant(HomePushSpec),
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HomePushSpec {
+    pub transport: String,
+}
+#[derive(Clone, PartialEq, Eq)]
+pub enum EventPushConfig {
+    Jmap(JmapPushSpec, String),
+    HomeAssistant,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -99,9 +168,39 @@ impl JmapPushSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct RemoteMcp {
-    pub url: String,
+#[serde(untagged, deny_unknown_fields)]
+pub enum RemoteMcp {
+    Absolute { url: String },
+    HomeAssistant { path: String },
+}
+impl RemoteMcp {
+    pub fn absolute_url(&self) -> Option<&str> {
+        match self {
+            Self::Absolute { url } => Some(url),
+            _ => None,
+        }
+    }
+    pub fn matches(&self, endpoint: Option<&str>) -> bool {
+        let Some(endpoint) = endpoint else {
+            return false;
+        };
+        let Ok(url) = url::Url::parse(endpoint) else {
+            return false;
+        };
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return false;
+        }
+        match self {
+            Self::Absolute { url } => url == endpoint,
+            Self::HomeAssistant { path } => path == "/api/mcp" && url.path() == path,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -146,19 +245,32 @@ impl IntegrationManifest {
                 && self.description.len() <= 2048,
             "invalid integration metadata"
         );
-        let url = url::Url::parse(&self.mcp.url)?;
-        ensure!(
-            matches!(url.scheme(), "https" | "http")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none(),
-            "invalid integration MCP URL"
-        );
+        match &self.mcp {
+            RemoteMcp::Absolute { url } => {
+                ensure!(self.mcp.matches(Some(url)), "invalid integration MCP URL")
+            }
+            RemoteMcp::HomeAssistant { path } => ensure!(
+                path == "/api/mcp" && matches!(self.event, IntegrationEventSpec::HomeAssistant(_)),
+                "relative MCP paths are only supported for Home Assistant"
+            ),
+        }
         self.event.validate()?;
-        if let Some(push) = &self.push {
-            push.validate(&self.mcp.url)?;
+        match (&self.event, &self.push) {
+            (IntegrationEventSpec::Mail(_), Some(IntegrationPushSpec::Jmap(push))) => push
+                .validate(
+                    self.mcp
+                        .absolute_url()
+                        .context("JMAP needs an absolute MCP endpoint")?,
+                )?,
+            (
+                IntegrationEventSpec::HomeAssistant(_),
+                Some(IntegrationPushSpec::HomeAssistant(push)),
+            ) => ensure!(
+                push.transport == "home_assistant_websocket_v1",
+                "unsupported Home Assistant push transport"
+            ),
+            (_, None) => {}
+            _ => anyhow::bail!("integration event and push protocols do not match"),
         }
         ensure!(
             valid_id(&self.template.name)
@@ -229,15 +341,6 @@ impl IntegrationPluginsConfig {
                         .all(|b| b.is_ascii_hexdigit()),
                 "integration needs an approved manifest SHA-256"
             );
-            if binding.enabled && binding.push_enabled {
-                ensure!(
-                    binding
-                        .push_token
-                        .as_ref()
-                        .is_some_and(|s| !s.trim().is_empty()),
-                    "JMAP push requires a read-only API token"
-                );
-            }
             if let Some(token) = &binding.push_token {
                 ensure!(
                     token.len() <= 4096 && !token.contains(['\r', '\n']),
@@ -317,8 +420,7 @@ impl Config {
             .find(|s| s.name == binding.mcp_server)
             .context("integration MCP connection missing")?;
         ensure!(
-            server.transport == McpTransport::Http
-                && server.url.as_deref() == Some(manifest.mcp.url.as_str()),
+            server.transport == McpTransport::Http && manifest.mcp.matches(server.url.as_deref()),
             "integration connection does not match its declared MCP endpoint"
         );
         Ok(manifest)
@@ -339,11 +441,21 @@ impl Config {
                 .instances
                 .get(&source.plugin)
                 .context("event integration missing")?;
-            self.integration_manifest(&source.plugin)?;
-            view.source = "fastmail".into(); // legacy mail checkpoint codec identity
+            let manifest = self.integration_manifest(&source.plugin)?;
+            view.source = manifest.event.kind().into(); // retain each adapter's checkpoint identity
             view.mcp_server = binding.mcp_server.clone();
             view.enabled &= binding.enabled;
         }
+        if view.source == "fastmail" {
+            ensure!(
+                view.entities.is_empty()
+                    && view.states.is_empty()
+                    && view.above.is_none()
+                    && view.below.is_none(),
+                "mail integration does not support device conditions"
+            );
+        }
+        view.validate()?;
         Ok(view)
     }
     pub fn integration_poll_allowed(&self, owner: &str, server: &str, tool: &str) -> bool {
@@ -357,7 +469,7 @@ impl Config {
             && risk.auto_approve.contains(&name)
     }
     /// Materialize connection inputs from canonical config; callers re-resolve on every policy tick.
-    pub fn event_push(&self, alias: &str) -> Result<Option<(JmapPushSpec, String)>> {
+    pub fn event_push(&self, alias: &str) -> Result<Option<EventPushConfig>> {
         let Some(rule) = self.events.rules.get(alias) else {
             return Ok(None);
         };
@@ -369,25 +481,50 @@ impl Config {
         if source.kind != "plugin" {
             return Ok(None);
         }
+        self.integration_push(&source.plugin)
+    }
+    pub fn integration_push(&self, instance: &str) -> Result<Option<EventPushConfig>> {
         let binding = self
             .integration_plugins
             .instances
-            .get(&source.plugin)
+            .get(instance)
             .context("integration missing")?;
         if !binding.push_enabled {
             return Ok(None);
         }
         ensure!(binding.enabled, "integration disabled");
-        let manifest = self.integration_manifest(&source.plugin)?;
-        let push = manifest
-            .push
-            .context("package does not declare JMAP push")?;
-        let token = binding
-            .push_token
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .context("JMAP push credential missing")?;
-        Ok(Some((push, token.clone())))
+        let manifest = self.integration_manifest(instance)?;
+        match manifest.push.context("package does not declare push")? {
+            IntegrationPushSpec::Jmap(push) => {
+                let token = binding
+                    .push_token
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .context("JMAP push credential missing")?;
+                Ok(Some(EventPushConfig::Jmap(push, token.clone())))
+            }
+            IntegrationPushSpec::HomeAssistant(_) => {
+                let server = self
+                    .mcp
+                    .servers
+                    .iter()
+                    .find(|s| s.name == binding.mcp_server)
+                    .context("Home Assistant connection missing")?;
+                ensure!(
+                    server
+                        .headers
+                        .get("Authorization")
+                        .and_then(|v| v.strip_prefix("Bearer "))
+                        .is_some_and(|v| !v.is_empty()),
+                    "Home Assistant push requires the bound MCP bearer credential"
+                );
+                ensure!(
+                    binding.push_token.is_none(),
+                    "Home Assistant reuses its MCP credential; a separate push token is not supported"
+                );
+                Ok(Some(EventPushConfig::HomeAssistant))
+            }
+        }
     }
     pub fn event_mail_spec(&self, alias: &str) -> Result<MailPollSpec> {
         if let Some(rule) = self.events.rules.get(alias) {
@@ -397,10 +534,10 @@ impl Config {
                 .get(&rule.source)
                 .context("event source missing")?;
             if source.kind == "plugin" {
-                return Ok(self.integration_manifest(&source.plugin)?.event);
+                return self.integration_manifest(&source.plugin)?.event.into_mail();
             }
         }
-        Ok(bundled_fastmail()?.event)
+        bundled_fastmail()?.event.into_mail()
     }
 }
 
@@ -445,7 +582,14 @@ mod tests {
         config.mcp.servers.push(McpServerConfig {
             name: "mail".into(),
             transport: McpTransport::Http,
-            url: Some(bundled_fastmail().unwrap().mcp.url),
+            url: Some(
+                bundled_fastmail()
+                    .unwrap()
+                    .mcp
+                    .absolute_url()
+                    .unwrap()
+                    .to_owned(),
+            ),
             ..Default::default()
         });
         config.mcp_bundles.insert(
@@ -477,6 +621,81 @@ mod tests {
             },
         );
         config
+    }
+
+    #[test]
+    fn home_package_uses_bound_endpoint_and_credential_with_explicit_entity_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = fixture(dir.path());
+        let path = package_root(&config).join("homeassistant");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("integration.toml"),
+            include_str!("../integrations/homeassistant/integration.toml"),
+        )
+        .unwrap();
+        let (_, digest) = load_package(&package_root(&config), "homeassistant").unwrap();
+        config.mcp.servers[0].url = Some("http://127.0.0.1:8123/api/mcp".into());
+        config.mcp.servers[0]
+            .headers
+            .insert("Authorization".into(), "Bearer fixture".into());
+        let binding = config
+            .integration_plugins
+            .instances
+            .get_mut("mail")
+            .unwrap();
+        binding.package = "homeassistant".into();
+        binding.manifest_sha256 = digest;
+        binding.push_enabled = true;
+        config.events.sources.insert(
+            "home".into(),
+            crate::events::EventSource {
+                enabled: true,
+                kind: "plugin".into(),
+                plugin: "mail".into(),
+                entities: vec!["light.example".into()],
+                ..Default::default()
+            },
+        );
+        config.events.rules.insert(
+            "home".into(),
+            crate::events::EventRule {
+                enabled: true,
+                source: "home".into(),
+                sop: "review".into(),
+                states: vec!["unavailable".into()],
+                ..Default::default()
+            },
+        );
+        let manifest = config.integration_manifest("mail").unwrap();
+        assert_eq!(manifest.event.kind(), "home_assistant");
+        assert_eq!(
+            manifest.event.permission_tool(),
+            "homeassistant__GetLiveContext"
+        );
+        assert!(matches!(
+            config.event_push("home").unwrap(),
+            Some(EventPushConfig::HomeAssistant)
+        ));
+        assert_eq!(
+            config.event_watch("home").unwrap().entities,
+            vec!["light.example"]
+        );
+        assert_eq!(config.mcp_servers_for_agent("observer").len(), 1);
+        config
+            .events
+            .sources
+            .get_mut("home")
+            .unwrap()
+            .entities
+            .clear();
+        assert!(
+            config.event_watch("home").is_err(),
+            "empty means all entities on the HA server and must never be sent"
+        );
+        config.mcp.servers[0].url = Some("http://127.0.0.1:8123/not-mcp".into());
+        assert!(config.integration_manifest("mail").is_err());
+        assert!(config.mcp_servers_for_agent("observer").is_empty());
     }
 
     #[tokio::test]
@@ -515,7 +734,7 @@ mod tests {
             .get_mut("mail")
             .unwrap()
             .push_enabled = true;
-        assert!(config.integration_plugins.validate().is_err());
+        assert!(config.integration_push("mail").is_err());
         config
             .integration_plugins
             .instances
@@ -523,7 +742,9 @@ mod tests {
             .unwrap()
             .push_token = Some("fixture".into());
         assert!(config.integration_plugins.validate().is_ok());
-        let mut push = bundled_fastmail().unwrap().push.unwrap();
+        let IntegrationPushSpec::Jmap(mut push) = bundled_fastmail().unwrap().push.unwrap() else {
+            panic!("expected JMAP");
+        };
         push.session_url = "https://attacker.invalid/session".into();
         assert!(push.validate("https://api.fastmail.com/mcp").is_err());
     }
@@ -550,7 +771,14 @@ mod tests {
             .enabled = true;
         config.mcp.servers[0].url = Some("https://example.invalid/mcp".into());
         assert!(config.mcp_servers_for_agent("observer").is_empty());
-        config.mcp.servers[0].url = Some(bundled_fastmail().unwrap().mcp.url);
+        config.mcp.servers[0].url = Some(
+            bundled_fastmail()
+                .unwrap()
+                .mcp
+                .absolute_url()
+                .unwrap()
+                .to_owned(),
+        );
         let path = package_root(&config).join("fastmail/integration.toml");
         let original = std::fs::read_to_string(&path).unwrap();
         std::fs::write(path, format!("{original}\n# changed\n")).unwrap();
@@ -599,7 +827,9 @@ mod tests {
                 .is_err()
         );
         let mut manifest = bundled_fastmail().unwrap();
-        manifest.mcp.url = "https://user:secret@example.invalid/mcp".into();
+        manifest.mcp = RemoteMcp::Absolute {
+            url: "https://user:secret@example.invalid/mcp".into(),
+        };
         assert!(manifest.validate().is_err());
     }
 

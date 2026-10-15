@@ -134,6 +134,10 @@ export default function Events() {
     setEditor((e) => (e ? { ...e, value: { ...e.value, [key]: value } } : e));
   const sourceRules = (id: string) =>
     Object.entries(data?.config.rules ?? {}).filter(([, r]) => r.source === id);
+  const sourceKind = (source: EventSource) =>
+    source.kind === "plugin"
+      ? (data?.integration_kinds[source.plugin] ?? "fastmail")
+      : source.kind;
   const effectiveSource = (id: string) =>
     data?.resolved_sources[id] ?? data?.config.sources[id];
   const health = (id: string) => data?.rules.find((r) => r.id === id);
@@ -300,7 +304,11 @@ export default function Events() {
                                   : "Home Assistant"}{" "}
                                 ·{" "}
                                 {data.resolved_sources[id]?.push
-                                  ? t("integrations_plugin.push_mode")
+                                  ? t(
+                                      display.kind === "home_assistant"
+                                        ? "integrations_plugin.home_push_mode"
+                                        : "integrations_plugin.push_mode",
+                                    )
                                   : `${t("events.polling")} ${source.poll_interval_secs}s`}
                               </p>
                             </div>
@@ -820,7 +828,7 @@ export default function Events() {
                           }
                         />
                       </Field>
-                      {(editor.value as EventSource).kind !==
+                      {sourceKind(editor.value as EventSource) !==
                       "home_assistant" ? (
                         <Field label={t("events.query")}>
                           <input

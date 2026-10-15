@@ -1,0 +1,40 @@
+schema_version = 1
+name = "homeassistant"
+version = "0.1.0"
+title = "Home Assistant"
+description = "Home Assistant tools and scoped entity-state push events."
+
+[mcp]
+path = "/api/mcp"
+
+[event]
+adapter = "home_assistant_state_v1"
+type = "condition_entered"
+permission_tool = "homeassistant__GetLiveContext"
+
+[push]
+transport = "home_assistant_websocket_v1"
+
+[template]
+name = "observe-home-state"
+description = "Record scoped entity conditions without controlling devices or sending notifications. Configure conditions and duration in the event rule."
+sop_toml = '''
+[sop]
+name = "observe-home-state"
+description = "Record an observed device condition"
+version = "1.0.0"
+agent = "{{agent}}"
+execution_mode = "deterministic"
+deterministic = true
+[[triggers]]
+type = "channel"
+channel = "event_watch"
+alias = "{{rule}}"
+'''
+sop_markdown = '''
+## Steps
+
+1. **Record condition** — Preserve the event receipt without controlling appliances or sending messages.
+   - kind: capability
+   - capability: noop
+'''

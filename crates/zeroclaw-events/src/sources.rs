@@ -36,9 +36,9 @@ pub(super) async fn fetch(
     match watch.source.as_str() {
         "home_assistant" => HomeAssistantAdapter.fetch(watch, server, checkpoint).await,
         "fastmail" => {
-            let default = bundled_fastmail()?;
+            let default = bundled_fastmail()?.event.into_mail()?;
             let adapter = McpMailAdapter {
-                spec: mail_spec.unwrap_or(&default.event),
+                spec: mail_spec.unwrap_or(&default),
             };
             adapter.fetch(watch, server, checkpoint).await
         }
