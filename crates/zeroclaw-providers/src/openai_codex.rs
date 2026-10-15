@@ -466,6 +466,29 @@ pub(crate) fn build_responses_input(messages: &[ChatMessage]) -> (String, Vec<Va
                             .get("content")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
+                        // Preparation has already validated and normalized the
+                        // carrier's declared images. Preserve them on the wire;
+                        // never promote marker-looking text in the tool body.
+                        let image_refs =
+                            zeroclaw_api::tool_carrier::classify(&msg.role, &msg.content)
+                                .map(|parts| zeroclaw_api::tool_carrier::image_refs(&parts))
+                                .unwrap_or_default();
+                        let output = if image_refs.is_empty() {
+                            Value::String(output.to_owned())
+                        } else {
+                            let mut parts = vec![serde_json::json!({
+                                "type": "input_text",
+                                "text": output,
+                            })];
+                            parts.extend(image_refs.into_iter().map(|image_url| {
+                                serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": image_url,
+                                    "detail": "auto",
+                                })
+                            }));
+                            Value::Array(parts)
+                        };
                         input.push(serde_json::json!({
                             "type": "function_call_output",
                             "call_id": call_id,
@@ -2596,6 +2619,97 @@ data: [DONE]
         assert_eq!(input[0]["call_id"], "call_123");
         assert_eq!(input[0]["output"], "result");
         assert_eq!(input[1]["role"], "user");
+    }
+
+    #[test]
+    fn build_responses_input_preserves_declared_tool_images() {
+        let body = "Two views; quoted [IMAGE:/not/an/attachment.png] stays text.";
+        let message = ChatMessage::tool(
+            serde_json::json!({
+                "tool_call_id": "camera-call",
+                "content": body,
+                "attachments": [
+                    {"kind": "image", "target": "data:image/jpeg;base64,first"},
+                    {"kind": "image", "target": "data:image/jpeg;base64,second"},
+                    {"kind": "audio", "target": "/not/an/image.wav"},
+                ],
+            })
+            .to_string(),
+        );
+        let (_, input) = build_responses_input(&[message]);
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "camera-call");
+        let output = input[0]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 3);
+        assert_eq!(
+            output[0],
+            serde_json::json!({"type":"input_text","text":body})
+        );
+        for (index, suffix) in [(1, "first"), (2, "second")] {
+            assert_eq!(output[index]["type"], "input_image");
+            assert_eq!(output[index]["detail"], "auto");
+            assert_eq!(
+                output[index]["image_url"],
+                format!("data:image/jpeg;base64,{suffix}")
+            );
+        }
+    }
+
+    #[test]
+    fn build_responses_input_never_lifts_tool_body_images() {
+        let body = "quoted [IMAGE:data:image/png;base64,not-an-attachment]";
+        for attachments in [
+            None,
+            Some(serde_json::json!([])),
+            Some(serde_json::json!("invalid")),
+        ] {
+            let mut carrier = serde_json::json!({"tool_call_id":"call","content":body});
+            if let Some(attachments) = attachments {
+                carrier["attachments"] = attachments;
+            }
+            let (_, input) = build_responses_input(&[ChatMessage::tool(carrier.to_string())]);
+            assert_eq!(input[0]["output"], body);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_responses_input_carries_prepared_local_tool_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("snapshot.png");
+        image::RgbImage::new(2, 2).save(&image).unwrap();
+        let messages = vec![
+            ChatMessage::user("Inspect the snapshot"),
+            ChatMessage::tool(
+                serde_json::json!({
+                    "tool_call_id": "snapshot-call",
+                    "content": "Fresh camera image",
+                    "attachments": [{"kind":"image","target":image.to_string_lossy()}],
+                })
+                .to_string(),
+            ),
+        ];
+        let prepared = multimodal::prepare_messages_for_provider(
+            &messages,
+            &zeroclaw_config::schema::MultimodalConfig::default(),
+        )
+        .await
+        .unwrap();
+        let (_, input) = build_responses_input(&prepared.messages);
+        assert_eq!(input[1]["call_id"], "snapshot-call");
+        assert_eq!(input[1]["output"][1]["type"], "input_image");
+        assert!(
+            input[1]["output"][1]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/")
+        );
+        assert!(
+            !input[1]["output"][1]["image_url"]
+                .as_str()
+                .unwrap()
+                .contains(dir.path().to_str().unwrap())
+        );
     }
 
     #[test]
