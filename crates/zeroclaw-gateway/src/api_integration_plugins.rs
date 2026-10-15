@@ -42,6 +42,7 @@ pub struct IntegrationPluginsResponse {
     pub connections: Vec<IntegrationConnection>,
     pub invalid_instances: Vec<String>,
     pub discovery_error: bool,
+    pub push_credentials_configured: Vec<String>,
 }
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -125,8 +126,16 @@ pub async fn get(State(state): State<AppState>, headers: HeaderMap) -> Response 
         Ok(r) => r,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
+    let mut public_config = config.integration_plugins;
+    let mut push_credentials_configured = Vec::new();
+    for (id, binding) in &mut public_config.instances {
+        if binding.push_token.take().is_some_and(|s| !s.is_empty()) {
+            push_credentials_configured.push(id.clone());
+        }
+    }
     Json(IntegrationPluginsResponse {
-        config: config.integration_plugins,
+        config: public_config,
+        push_credentials_configured,
         revision: rev,
         packages,
         connections,
@@ -153,13 +162,40 @@ pub async fn put(
     }
     let mut working = before.clone();
     working.integration_plugins = body.config;
+    for (id, binding) in &mut working.integration_plugins.instances {
+        // Omitted/null input keeps the credential for the same service/account binding.
+        // An explicit empty string clears it. GET never returns a secret or a mask to resubmit.
+        if binding.push_token.is_none() {
+            binding.push_token = before
+                .integration_plugins
+                .instances
+                .get(id)
+                .filter(|old| {
+                    old.package == binding.package && old.mcp_server == binding.mcp_server
+                })
+                .and_then(|old| old.push_token.clone());
+        } else if binding
+            .push_token
+            .as_ref()
+            .is_some_and(|s| s.trim().is_empty())
+        {
+            binding.push_token = None;
+        }
+    }
     if let Err(e) = working.validate() {
         return error(StatusCode::UNPROCESSABLE_ENTITY, e);
     }
     for (id, binding) in &working.integration_plugins.instances {
         if binding.enabled {
-            if let Err(e) = working.integration_manifest(id) {
-                return error(StatusCode::UNPROCESSABLE_ENTITY, e);
+            match working.integration_manifest(id) {
+                Ok(manifest) if !binding.push_enabled || manifest.push.is_some() => {}
+                Ok(_) => {
+                    return error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "Package does not declare JMAP push",
+                    );
+                }
+                Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
             }
         }
     }
@@ -229,6 +265,53 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
     #[tokio::test]
+    async fn catalog_redacts_push_token_and_unrelated_edits_preserve_it() {
+        use axum::body::to_bytes;
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::tests::admin_paircode_state(&dir, false, false);
+        let mut config = state.config.read().clone();
+        config.integration_plugins.instances.insert(
+            "mail".into(),
+            zeroclaw_config::integration_plugins::IntegrationBinding {
+                package: "fastmail".into(),
+                mcp_server: "mail".into(),
+                manifest_sha256: "0".repeat(64),
+                push_token: Some("private-push-fixture".into()),
+                ..Default::default()
+            },
+        );
+        state.config_authority.publish_for_test(config);
+        let response = get(State(state.clone()), HeaderMap::new()).await;
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            !String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .contains("private-push-fixture")
+        );
+        assert_eq!(data["push_credentials_configured"], json!(["mail"]));
+        let incoming: IntegrationPluginsConfig =
+            serde_json::from_value(data["config"].clone()).unwrap();
+        assert!(incoming.instances["mail"].push_token.is_none());
+        let response = put(
+            State(state.clone()),
+            None,
+            Json(IntegrationPluginsWrite {
+                config: incoming,
+                revision: data["revision"].as_str().unwrap().into(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.config.read().integration_plugins.instances["mail"]
+                .push_token
+                .as_deref(),
+            Some("private-push-fixture")
+        );
+    }
+
+    #[tokio::test]
     async fn stale_or_unpinned_integration_cannot_be_activated() {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::tests::admin_paircode_state(&dir, false, false);
@@ -254,6 +337,7 @@ mod tests {
                 package: "missing".into(),
                 mcp_server: "mail".into(),
                 manifest_sha256: "0".repeat(64),
+                ..Default::default()
             },
         );
         assert_eq!(

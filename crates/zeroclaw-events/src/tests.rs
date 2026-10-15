@@ -722,7 +722,7 @@ async fn integration_migration_preserves_checkpoint_and_pause_blocks_queued_disp
     manifest.mcp.url = "https://example.invalid/mcp".into();
     // Serialize through JSON -> TOML is unnecessary: use the canonical package bytes and replace only fixture endpoint.
     let bytes = include_str!("../../zeroclaw-config/integrations/fastmail/integration.toml")
-        .replace("https://api.fastmail.com/mcp", &manifest.mcp.url);
+        .replace("https://api.fastmail.com", "https://example.invalid");
     std::fs::write(path.join("integration.toml"), bytes).unwrap();
     let (_, digest) = load_package(&package_root(&config), "fastmail").unwrap();
     config.integration_plugins.instances.insert(
@@ -732,6 +732,7 @@ async fn integration_migration_preserves_checkpoint_and_pause_blocks_queued_disp
             package: "fastmail".into(),
             manifest_sha256: digest,
             mcp_server: "fixture".into(),
+            ..Default::default()
         },
     );
     let source = config.events.sources.get_mut("mail").unwrap();

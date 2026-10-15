@@ -27,11 +27,14 @@ def main():
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--native", action="store_true")
     parser.add_argument("--plugin", action="store_true", help="Exercise the Fastmail integration package")
+    parser.add_argument("--push", action="store_true", help="Exercise JMAP SSE wake-ups without mail polling")
     args = parser.parse_args()
+    if args.push:
+        args.plugin = True
     if args.plugin:
         args.native = True
     binary = args.binary.resolve()
-    state = {"value": "on", "reads": 0, "model_calls": 0, "unexpected": []}
+    state = {"value": "on", "reads": 0, "model_calls": 0, "unexpected": [], "push_revision":0, "push_connections":0, "disconnect":0, "stop":False}
 
     class Fixture(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -46,6 +49,32 @@ def main():
             self.wfile.write(data)
 
         def do_GET(self):
+            if args.push and self.path == "/jmap/session":
+                assert self.headers.get("Authorization") == "Bearer fixture-push-token"
+                self.reply({"primaryAccounts":{"urn:ietf:params:jmap:mail":"fixture"}, "eventSourceUrl":f"http://127.0.0.1:{self.server.server_port}/jmap/event"})
+                return
+            if args.push and self.path.startswith("/jmap/event?"):
+                assert self.headers.get("Authorization") == "Bearer fixture-push-token"
+                state["push_connections"] += 1
+                disconnected = state["disconnect"]
+                last = state["push_revision"]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    while not state["stop"] and state["disconnect"] == disconnected:
+                        if last != state["push_revision"]:
+                            last = state["push_revision"]
+                            body = json.dumps({"@type":"StateChange", "changed":{"fixture":{"Email":str(last)}}})
+                            self.wfile.write(("event:state\ndata:"+body+"\n\n").encode())
+                        else:
+                            self.wfile.write(b'event:ping\ndata:{"interval":1}\n\n')
+                        self.wfile.flush()
+                        time.sleep(0.25)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
             if self.path == "/v1/models":
                 self.reply({"data": [{"id": "fixture"}]})
                 return
@@ -178,7 +207,7 @@ enabled = false
             if args.plugin:
                 package = root / "shared/integration-plugins/fastmail"
                 package.mkdir(parents=True)
-                manifest = (Path(__file__).resolve().parents[2] / "crates/zeroclaw-config/integrations/fastmail/integration.toml").read_text().replace("https://api.fastmail.com/mcp", f"http://127.0.0.1:{fixture.server_port}/mcp")
+                manifest = (Path(__file__).resolve().parents[2] / "crates/zeroclaw-config/integrations/fastmail/integration.toml").read_text().replace("https://api.fastmail.com", f"http://127.0.0.1:{fixture.server_port}").replace("https://phl.api.fastmail.com", f"http://127.0.0.1:{fixture.server_port}")
                 (package / "integration.toml").write_text(manifest)
                 digest = hashlib.sha256(manifest.encode()).hexdigest()
                 config = config.replace('[risk_profiles.observer]', '[risk_profiles.observer]\nauto_approve = ["fixture__search_email"]')
@@ -199,6 +228,8 @@ enabled = true
 source = "mail"
 sop = "review"
 ''' + config[end:]
+            if args.push:
+                config = config.replace('[integration_plugins.instances.mail]', '[integration_plugins.instances.mail]\npush_enabled = true\npush_token = "fixture-push-token"')
             path.write_text(config)
         env = {k: v for k, v in os.environ.items() if not k.startswith("ZEROCLAW_")}
         env["NO_PROXY"] = "127.0.0.1,localhost"
@@ -254,6 +285,10 @@ sop = "review"
             with log_path.open("a") as log:
                 process = start()
                 wait_until(baseline_committed)
+                if args.push:
+                    idle_reads = state["reads"]
+                    time.sleep(11)
+                    assert state["reads"] == idle_reads, "idle SSE connection polled mail"
                 if args.native:
                     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     def api(path, body=None, headers=None, method=None):
@@ -287,11 +322,16 @@ sop = "review"
                     setting = "instances" if args.plugin else "sources"
                     instance = "mail" if args.plugin else "ha"
                     overview = api(endpoint, headers=auth)
+                    if args.push:
+                        assert overview["config"]["instances"]["mail"]["push_token"] is None
+                        assert "fixture-push-token" not in json.dumps(overview)
                     overview["config"][setting][instance]["enabled"] = False
                     api(endpoint, {"config":overview["config"],"revision":overview["revision"]}, auth, "PUT")
                     saved = tomllib.loads((root / "config.toml").read_text())
                     section = "integration_plugins" if args.plugin else "events"
                     assert saved[section][setting][instance]["enabled"] is False, "pause was not persisted"
+                    if args.push:
+                        assert saved[section][setting][instance]["push_token"].startswith("enc2:"), "push credential was not encrypted"
                     time.sleep(3)
                     paused_reads = state["reads"]
                     time.sleep(11)
@@ -305,21 +345,33 @@ sop = "review"
                 warmed_up_calls = state["model_calls"]
                 assert not runs(), "baseline unexpectedly started a run"
                 state["value"] = "unavailable"
+                pushed_at = time.monotonic()
+                state["push_revision"] += 1
                 wait_until(lambda: any(r.get("status") == "completed" for r in runs()))
                 assert len(runs()) == 1
+                if args.push:
+                    assert time.monotonic()-pushed_at < 5, "SSE did not promptly wake the observer"
                 if args.native:
                     records = api("/api/event-monitor", headers=auth)["records"]
                     assert len(records) == 1
                     assert records[0]["run_id"] == runs()[0]["run_id"]
                     assert records[0]["run_status"] == "completed"
                 assert state["model_calls"] == warmed_up_calls, "event observer unexpectedly called a model"
+                if args.push:
+                    connected = state["push_connections"]
+                    reads_before_disconnect = state["reads"]
+                    state["disconnect"] += 1
+                    wait_until(lambda: state["push_connections"] > connected and state["reads"] > reads_before_disconnect)
+                    assert len(runs()) == 1, "reconnect replayed a delivered event"
                 process.terminate()
                 process.wait(timeout=15)
                 before = state["reads"]
                 process = start()
                 # The second read proves the first post-restart cycle finished;
                 # observing request arrival alone races its eventual dispatch.
-                wait_until(lambda: state["reads"] >= before + 2)
+                wait_until(lambda: state["reads"] >= before + (1 if args.push else 2))
+                if args.push:
+                    time.sleep(3)
                 assert len(runs()) == 1, "restart replayed a delivered event"
                 assert not state["unexpected"], state["unexpected"]
                 if args.plugin:
@@ -331,7 +383,7 @@ sop = "review"
                     assert state["reads"] == paused_reads, "unapproved package kept polling"
                     catalog = api("/api/integration-plugins", headers=auth)
                     assert "mail" in catalog["invalid_instances"]
-                print("PASS: daemon baseline -> pause/resume -> event -> completed SOP -> restart without replay" + (" -> tamper stops polling" if args.plugin else ""))
+                print("PASS: daemon baseline -> pause/resume -> event -> completed SOP -> restart without replay" + (" -> tamper stops observation" if args.plugin else "") + (" (SSE: no idle polling, prompt wake-up, reconnect, secret redaction)" if args.push else ""))
         except Exception:
             print(diagnostic())
             if log_path.exists():
@@ -345,6 +397,7 @@ sop = "review"
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+            state["stop"] = True
             fixture.shutdown()
             fixture.server_close()
 

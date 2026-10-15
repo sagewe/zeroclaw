@@ -1,11 +1,15 @@
 schema_version = 1
 name = "fastmail"
-version = "0.1.0"
+version = "0.2.0"
 title = "Fastmail"
 description = "Mail tools and new-message events using the official Fastmail MCP service."
 
 [mcp]
 url = "https://api.fastmail.com/mcp"
+
+[push]
+session_url = "https://api.fastmail.com/jmap/session"
+event_origins = ["https://api.fastmail.com", "https://phl.api.fastmail.com"]
 
 [event]
 adapter = "mcp_mail_poll_v1"

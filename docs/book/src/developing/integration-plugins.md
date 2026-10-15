@@ -20,9 +20,17 @@ from executable WASM plugins and their `manifest.toml` protocol.
   engine owns execution and notification receipts. The dashboard resolves these
   sources on demand rather than storing additional status copies.
 
-The host only supports `mcp_mail_poll_v1` / `email_received` in schema version 1.
-It polls at the source's configured interval (60 seconds by default); it does not
-subscribe to JMAP push or MCP notifications. The manifest supplies the tool,
+The host supports `mcp_mail_poll_v1` / `email_received` metadata mapping in
+schema version 1. Fastmail package 0.2.0 additionally declares JMAP EventSource
+push. The instance chooses push with `push_enabled = true`; existing instances
+keep polling until explicitly migrated. Push opens an authenticated outbound SSE
+connection, so no public webhook or inbound port is required. Idle connections
+exchange heartbeats without querying mail. On Email state changes, startup, and
+reconnect, the existing MCP metadata reader reconciles against the durable mail
+checkpoint. Push payloads are wake-up hints and never become agent instructions.
+The host checks activation and permissions every two seconds, reconnects after a
+90-second heartbeat timeout, and catches up after disconnects without replaying
+delivered mail. There is no silent fallback to periodic mail polling. The manifest supplies the tool,
 argument names, and JSON paths. The host bounds responses and pagination and
 projects only message ID, timestamp, subject, and sender addresses into events.
 Body and attachments remain available through the agent's separately granted MCP.
@@ -43,7 +51,21 @@ No downloaded code is executed.
 
 After starting the daemon, open **Plugins → Integration plugins** at
 `/plugins/integrations`. Bind the package to an existing Fastmail MCP connection
-whose URL exactly matches `https://api.fastmail.com/mcp`. Review the manifest
+whose URL exactly matches `https://api.fastmail.com/mcp`.
+To use push, supply a separate Fastmail **read-only mail JMAP API token** in the
+binding editor and select JMAP push. MCP credentials cannot authenticate to JMAP.
+The token is encrypted through the existing config secret store; the integration
+API returns only whether it is configured. Leaving the field blank preserves the
+credential for the same package/connection binding. The authenticated API can
+clear it with an explicit empty string while push is disabled. Changing the
+package or MCP connection does not silently carry the token to a different binding.
+
+The package pins the JMAP session URL and allowed event origins. Fastmail session
+discovery may return a regional event origin; the bundled allowlist includes
+`https://api.fastmail.com` and `https://phl.api.fastmail.com`. Other regions require
+reviewing and extending the manifest allowlist. Redirects are rejected; discovery
+cannot forward credentials to an unlisted origin. See [Fastmail API documentation](https://www.fastmail.com/dev/)
+and [JMAP EventSource](https://www.rfc-editor.org/rfc/rfc8620.html#section-7.3). Review the manifest
 fingerprint and enable the instance. Configuration can also be written directly
 while the daemon is stopped:
 
@@ -107,9 +129,15 @@ cargo test -p zeroclaw-events --lib
 cargo test -p zeroclaw-gateway api_integration_plugins --lib
 cargo build --features channel-event-watch,channel-wechat
 python3 scripts/ci/event_watch_smoke.py --binary target/debug/zeroclaw --plugin
+python3 scripts/ci/event_watch_smoke.py --binary target/debug/zeroclaw --push
 ```
 
 The loopback smoke test uses synthetic mail and a deterministic SOP. It checks
 baseline suppression, plugin pause/resume through the authenticated API, one
 completed event run, restart without replay, and rejection of changed package
 bytes. It neither accesses real mail nor sends a real notification.
+
+The push fixture additionally verifies no idle mail polling, a prompt state-change
+wake-up, reconnect catch-up, persisted enable/disable, and credential redaction.
+The mail checkpoint fingerprint depends on the metadata mapping and MCP account,
+not the delivery transport or push token, so selecting SSE preserves deduplication.

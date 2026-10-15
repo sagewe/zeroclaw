@@ -267,7 +267,9 @@ export default function Events() {
                         ? "error"
                         : sourceStatus(
                             display.enabled,
-                            source.poll_interval_secs,
+                            data.resolved_sources[id]?.push
+                              ? 30
+                              : source.poll_interval_secs,
                             rules.map(([rid, r]) => ({
                               enabled: r.enabled,
                               ...health(rid),
@@ -296,8 +298,10 @@ export default function Events() {
                                 {display.kind === "fastmail"
                                   ? "Fastmail"
                                   : "Home Assistant"}{" "}
-                                · {t("events.polling")}{" "}
-                                {source.poll_interval_secs}s
+                                ·{" "}
+                                {data.resolved_sources[id]?.push
+                                  ? t("integrations_plugin.push_mode")
+                                  : `${t("events.polling")} ${source.poll_interval_secs}s`}
                               </p>
                             </div>
                           </div>
@@ -328,7 +332,11 @@ export default function Events() {
                           </div>
                           <div>
                             <p className="text-xs text-pc-text-muted mb-1">
-                              {t("events.last_poll")}
+                              {t(
+                                data.resolved_sources[id]?.push
+                                  ? "events.push_activity"
+                                  : "events.last_poll",
+                              )}
                             </p>
                             <p className="text-pc-text">{date(recent)}</p>
                           </div>
@@ -791,7 +799,13 @@ export default function Events() {
                           ))}
                         </select>
                       </Field>
-                      <Field label={t("events.interval")}>
+                      <Field
+                        label={t(
+                          data.resolved_sources[editor.id]?.push
+                            ? "events.interval_push"
+                            : "events.interval",
+                        )}
+                      >
                         <input
                           className={input}
                           type="number"

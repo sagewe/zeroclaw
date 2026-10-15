@@ -157,7 +157,7 @@ pub async fn get_events(State(state): State<AppState>, headers: HeaderMap) -> Re
         let valid=source.kind!="plugin" || config.integration_manifest(&source.plugin).is_ok();
         let enabled=source.enabled && (source.kind!="plugin" || binding.is_some_and(|b|b.enabled) && valid);
         let connection=if source.kind=="plugin" {binding.map(|b|b.mcp_server.as_str()).unwrap_or("")}else{&source.mcp_server};
-        (id.clone(),json!({"kind":if source.kind=="plugin" {"fastmail"}else{source.kind.as_str()},"enabled":enabled,"mcp_server":connection,"valid":valid}))
+        (id.clone(),json!({"kind":if source.kind=="plugin" {"fastmail"}else{source.kind.as_str()},"enabled":enabled,"mcp_server":connection,"valid":valid,"push":source.kind=="plugin" && binding.is_some_and(|b|b.push_enabled)}))
     }).collect();
     Json(EventsResponse {
         config: config.events,

@@ -25,6 +25,8 @@ const empty: IntegrationBinding = {
   package: "",
   manifest_sha256: "",
   mcp_server: "",
+  push_enabled: false,
+  push_token: null,
 };
 export default function IntegrationPlugins() {
   const { locale } = useLocaleContext();
@@ -192,7 +194,11 @@ export default function IntegrationPlugins() {
                       >
                         {p?.manifest?.event.type ?? "email_received"}
                         <p className="mt-1 text-xs text-pc-text-secondary">
-                          {t("integrations_plugin.polling")}
+                          {t(
+                            binding.push_enabled
+                              ? "integrations_plugin.push_mode"
+                              : "integrations_plugin.polling",
+                          )}
                         </p>
                       </Link>
                     </div>
@@ -409,6 +415,52 @@ export default function IntegrationPlugins() {
                   <p className="text-xs text-pc-text-secondary">
                     {t("integrations_plugin.connection_hint")}
                   </p>
+                  {pkg?.manifest?.push && (
+                    <div className="space-y-3 border-t border-pc-border pt-3">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={edit.binding.push_enabled}
+                          onChange={(e) =>
+                            setEdit({
+                              ...edit,
+                              binding: {
+                                ...edit.binding,
+                                push_enabled: e.target.checked,
+                              },
+                            })
+                          }
+                        />
+                        {t("integrations_plugin.push_mode")}
+                      </label>
+                      <label className="block text-sm space-y-1">
+                        <span>{t("integrations_plugin.push_token")}</span>
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          className={input}
+                          value={edit.binding.push_token ?? ""}
+                          onChange={(e) =>
+                            setEdit({
+                              ...edit,
+                              binding: {
+                                ...edit.binding,
+                                push_token: e.target.value || null,
+                              },
+                            })
+                          }
+                          placeholder={t(
+                            data.push_credentials_configured.includes(edit.id)
+                              ? "integrations_plugin.token_saved"
+                              : "integrations_plugin.token_missing",
+                          )}
+                        />
+                      </label>
+                      <p className="text-xs text-pc-text-secondary">
+                        {t("integrations_plugin.push_hint")}
+                      </p>
+                    </div>
+                  )}
                   {pkg?.sha256 !== edit.binding.manifest_sha256 && (
                     <label className="flex items-start gap-2 text-sm">
                       <input

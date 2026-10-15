@@ -9,6 +9,13 @@ export type Locale = 'ar' | 'bn' | 'cs' | 'da' | 'de' | 'el' | 'en' | 'es' | 'fi
 
 const translations: Record<Locale, Record<string, string>> = {
   zh: {
+    "events.interval_push": "备用轮询间隔（推送时不使用）",
+    "events.push_activity": "最近推送连接活动",
+    "integrations_plugin.push_mode": "JMAP 实时推送 · SSE",
+    "integrations_plugin.push_token": "JMAP 邮件只读 API 令牌",
+    "integrations_plugin.token_saved": "已加密保存；留空保持原值",
+    "integrations_plugin.token_missing": "输入 Fastmail 邮件只读 API 令牌",
+    "integrations_plugin.push_hint": "推送使用独立的 JMAP 只读令牌，加密保存且不回显。启动、重连时补查；连接空闲时不轮询邮件。",
     "integrations_plugin.title": "集成插件",
     "integrations_plugin.description": "把事件源、远程 MCP 工具和可选流程打包为一个服务集成。",
     "integrations_plugin.wasm": "WASM 插件",
@@ -61,7 +68,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "events.connection": "连接",
     "events.connection_error": "最近检查失败或已超时，请检查连接和 SOP 所属智能体的权限。",
     "events.no_sources": "添加第一个事件源，开始监听变化。",
-    "events.polling_note": "当前支持 Fastmail 和 Home Assistant 轮询，尚未接入推送订阅或 Webhook。",
+    "events.polling_note": "Fastmail 插件支持 JMAP 推送；Home Assistant 使用轮询。",
     "events.status.paused": "已暂停",
     "events.status.idle": "无生效规则",
     "events.status.waiting": "等待首次检查",
@@ -577,6 +584,13 @@ const translations: Record<Locale, Record<string, string>> = {
   },
 
   en: {
+    "events.interval_push": "Polling interval (unused in push mode)",
+    "events.push_activity": "Last push connection activity",
+    "integrations_plugin.push_mode": "JMAP push · SSE",
+    "integrations_plugin.push_token": "Read-only JMAP API token",
+    "integrations_plugin.token_saved": "Stored encrypted; leave blank to keep",
+    "integrations_plugin.token_missing": "Enter a read-only Fastmail API token",
+    "integrations_plugin.push_hint": "Push uses a separate read-only JMAP token, encrypted and never returned. Startup and reconnect reconcile mail; idle push connections do not poll mail.",
     "integrations_plugin.title": "Integration plugins",
     "integrations_plugin.description": "Service packages combining event sources, remote MCP tools and optional procedures.",
     "integrations_plugin.wasm": "WASM plugins",
@@ -629,7 +643,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "events.connection": "Connection",
     "events.connection_error": "The last check failed or is overdue. Verify the connection and SOP owner permissions.",
     "events.no_sources": "Add your first source to start observing changes.",
-    "events.polling_note": "This version polls Fastmail and Home Assistant. Push subscriptions and webhook ingestion are not enabled.",
+    "events.polling_note": "Fastmail plugins support JMAP push; Home Assistant uses polling.",
     "events.status.paused": "Paused",
     "events.status.idle": "No active rules",
     "events.status.waiting": "Waiting for first check",

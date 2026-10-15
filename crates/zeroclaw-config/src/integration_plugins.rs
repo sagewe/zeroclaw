@@ -32,6 +32,12 @@ pub struct IntegrationBinding {
     pub package: String,
     pub manifest_sha256: String,
     pub mcp_server: String,
+    /// Select the package's push transport. Polling remains the upgrade default.
+    pub push_enabled: bool,
+    /// Separate read-only JMAP credential; never included in package files.
+    #[secret]
+    #[credential_class = "encrypted_secret"]
+    pub push_token: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -45,7 +51,52 @@ pub struct IntegrationManifest {
     pub mcp: RemoteMcp,
     pub event: MailPollSpec,
     pub template: SopTemplate,
+    #[serde(default)]
+    pub push: Option<JmapPushSpec>,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct JmapPushSpec {
+    pub session_url: String,
+    pub event_origins: Vec<String>,
+}
+impl JmapPushSpec {
+    pub fn validate(&self, mcp_url: &str) -> Result<()> {
+        let url = url::Url::parse(&self.session_url)?;
+        let mcp = url::Url::parse(mcp_url)?;
+        ensure!(
+            url.origin() == mcp.origin()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && (url.scheme() == "https"
+                    || (url.scheme() == "http"
+                        && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")))),
+            "JMAP session must use the declared MCP origin over HTTPS (or loopback HTTP)"
+        );
+        ensure!(
+            !self.event_origins.is_empty() && self.event_origins.len() <= 8,
+            "JMAP push needs an explicit event origin allowlist"
+        );
+        for origin in &self.event_origins {
+            let parsed = url::Url::parse(origin)?;
+            ensure!(
+                parsed.origin().ascii_serialization() == *origin
+                    && (parsed.scheme() == "https"
+                        || (parsed.scheme() == "http"
+                            && matches!(
+                                parsed.host_str(),
+                                Some("127.0.0.1" | "localhost" | "[::1]")
+                            ))),
+                "invalid JMAP event origin"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -106,6 +157,9 @@ impl IntegrationManifest {
             "invalid integration MCP URL"
         );
         self.event.validate()?;
+        if let Some(push) = &self.push {
+            push.validate(&self.mcp.url)?;
+        }
         ensure!(
             valid_id(&self.template.name)
                 && self.template.sop_toml.len() <= 4000
@@ -175,6 +229,21 @@ impl IntegrationPluginsConfig {
                         .all(|b| b.is_ascii_hexdigit()),
                 "integration needs an approved manifest SHA-256"
             );
+            if binding.enabled && binding.push_enabled {
+                ensure!(
+                    binding
+                        .push_token
+                        .as_ref()
+                        .is_some_and(|s| !s.trim().is_empty()),
+                    "JMAP push requires a read-only API token"
+                );
+            }
+            if let Some(token) = &binding.push_token {
+                ensure!(
+                    token.len() <= 4096 && !token.contains(['\r', '\n']),
+                    "invalid JMAP token"
+                );
+            }
             ensure!(
                 servers.insert(&binding.mcp_server),
                 "an MCP connection may belong to only one integration instance"
@@ -287,6 +356,39 @@ impl Config {
             && !risk.always_ask.contains(&name)
             && risk.auto_approve.contains(&name)
     }
+    /// Materialize connection inputs from canonical config; callers re-resolve on every policy tick.
+    pub fn event_push(&self, alias: &str) -> Result<Option<(JmapPushSpec, String)>> {
+        let Some(rule) = self.events.rules.get(alias) else {
+            return Ok(None);
+        };
+        let source = self
+            .events
+            .sources
+            .get(&rule.source)
+            .context("event source missing")?;
+        if source.kind != "plugin" {
+            return Ok(None);
+        }
+        let binding = self
+            .integration_plugins
+            .instances
+            .get(&source.plugin)
+            .context("integration missing")?;
+        if !binding.push_enabled {
+            return Ok(None);
+        }
+        ensure!(binding.enabled, "integration disabled");
+        let manifest = self.integration_manifest(&source.plugin)?;
+        let push = manifest
+            .push
+            .context("package does not declare JMAP push")?;
+        let token = binding
+            .push_token
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .context("JMAP push credential missing")?;
+        Ok(Some((push, token.clone())))
+    }
     pub fn event_mail_spec(&self, alias: &str) -> Result<MailPollSpec> {
         if let Some(rule) = self.events.rules.get(alias) {
             let source = self
@@ -371,9 +473,59 @@ mod tests {
                 package: "fastmail".into(),
                 manifest_sha256: digest,
                 mcp_server: "mail".into(),
+                ..Default::default()
             },
         );
         config
+    }
+
+    #[tokio::test]
+    async fn push_token_is_a_secret_and_is_encrypted_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = fixture(dir.path());
+        config.data_dir = dir.path().join("data");
+        config
+            .integration_plugins
+            .instances
+            .get_mut("mail")
+            .unwrap()
+            .push_token = Some("jmap-fixture-secret".into());
+        assert!(Config::prop_is_secret(
+            "integration_plugins.instances.mail.push_token"
+        ));
+        config.save().await.unwrap();
+        let disk = std::fs::read_to_string(&config.config_path).unwrap();
+        assert!(!disk.contains("jmap-fixture-secret"));
+        let value: toml::Value = toml::from_str(&disk).unwrap();
+        assert!(
+            value["integration_plugins"]["instances"]["mail"]["push_token"]
+                .as_str()
+                .unwrap()
+                .starts_with("enc2:")
+        );
+    }
+
+    #[test]
+    fn push_activation_requires_credentials_and_approved_origins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = fixture(dir.path());
+        config
+            .integration_plugins
+            .instances
+            .get_mut("mail")
+            .unwrap()
+            .push_enabled = true;
+        assert!(config.integration_plugins.validate().is_err());
+        config
+            .integration_plugins
+            .instances
+            .get_mut("mail")
+            .unwrap()
+            .push_token = Some("fixture".into());
+        assert!(config.integration_plugins.validate().is_ok());
+        let mut push = bundled_fastmail().unwrap().push.unwrap();
+        push.session_url = "https://attacker.invalid/session".into();
+        assert!(push.validate("https://api.fastmail.com/mcp").is_err());
     }
 
     #[test]

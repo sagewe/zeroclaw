@@ -28,12 +28,16 @@ export type EventsState = Omit<
 > & {
   rules: RuleHealth[];
   records: EventRecord[];
-  resolved_sources: Record<string, {
-    kind: string;
-    enabled: boolean;
-    mcp_server: string;
-    valid: boolean;
-  }>;
+  resolved_sources: Record<
+    string,
+    {
+      kind: string;
+      enabled: boolean;
+      mcp_server: string;
+      valid: boolean;
+      push?: boolean;
+    }
+  >;
 };
 export const getEvents = () => apiFetch<EventsState>("/api/event-monitor");
 export const saveEvents = (config: EventsConfig, revision: string) =>

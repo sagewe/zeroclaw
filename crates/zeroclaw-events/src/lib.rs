@@ -3,6 +3,7 @@
 //! No LLM runs in the poll loop. Events enter the shared, untrusted Channel SOP
 //! ingress and its generation-owned driver. Live config owns permissions and
 //! filters; events.db owns observations and delivery admission, never SOP state.
+mod push;
 pub mod service;
 mod sources;
 pub mod store;
@@ -240,6 +241,76 @@ impl EventWatchChannel {
     }
 }
 
+impl EventWatchChannel {
+    async fn observe_once(&self, store: &Store, checkpoint: &mut Checkpoint) -> Result<()> {
+        let (watch, server, revision, mail_spec) = self.resolve()?;
+        if checkpoint.revision != revision {
+            *checkpoint = Checkpoint {
+                revision: revision.clone(),
+                ..Checkpoint::default()
+            };
+        }
+        self.drain(store).await?;
+        let snapshot = tokio::time::timeout(
+            Duration::from_secs(90),
+            sources::fetch(&watch, server, checkpoint, mail_spec.as_ref()),
+        )
+        .await
+        .context("event watch poll timed out")??;
+        // A disabled/reconfigured watch cannot publish a completed stale read.
+        let (_, _, current_revision, _) = self.resolve()?;
+        if current_revision != revision {
+            return Ok(());
+        }
+        let mut next = checkpoint.clone();
+        let events = next.observe(&watch, snapshot, Utc::now().timestamp_millis())?;
+        store.save(&next, &events)?;
+        store.poll_succeeded()?;
+        *checkpoint = next;
+        self.drain(store).await?;
+        Ok(())
+    }
+
+    async fn listen_push(
+        &self,
+        store: &Store,
+        checkpoint: &mut Checkpoint,
+        settings: (zeroclaw_config::integration_plugins::JmapPushSpec, String),
+    ) -> Result<()> {
+        self.resolve()?;
+        self.drain(store).await?;
+        let mut connection = push::PushConnection::connect(&settings.0, &settings.1).await?;
+        zeroclaw_log::record!(
+            INFO,
+            zeroclaw_log::Event::new(module_path!(), zeroclaw_log::Action::Note)
+                .with_attrs(json!({"alias": self.alias, "transport":"jmap_sse"})),
+            "JMAP push stream connected"
+        );
+        // Subscribe first, then catch up: changes during the read stay buffered in SSE.
+        self.observe_once(store, checkpoint).await?;
+        let revision = checkpoint.revision.clone();
+        let mut activity = tokio::time::Instant::now();
+        let mut policy_tick = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                biased;
+                _ = policy_tick.tick() => {
+                    let (_, _, current_revision, _) = self.resolve()?;
+                    ensure!(current_revision == revision && self.live.read().event_push(&self.alias)?.as_ref() == Some(&settings), "JMAP push policy changed; reconnect required");
+                    ensure!(activity.elapsed() < Duration::from_secs(90), "JMAP push heartbeat timed out");
+                    self.drain(store).await?;
+                }
+                changed = connection.next() => {
+                    let changed = changed?;
+                    activity = tokio::time::Instant::now();
+                    if changed { self.observe_once(store, checkpoint).await?; }
+                    store.poll_succeeded()?;
+                }
+            }
+        }
+    }
+}
+
 fn disposition(outcome: &SopIngressOutcome) -> &'static str {
     match outcome {
         SopIngressOutcome::Dispatched(results) if !results.is_empty() => {
@@ -298,32 +369,13 @@ impl Channel for EventWatchChannel {
                 "Event watch has ambiguous deliveries requiring operator review; they will not be replayed automatically"
             );
         }
+        let push = { self.live.read().event_push(&self.alias)? };
+        if let Some(settings) = push {
+            return self.listen_push(&store, &mut checkpoint, settings).await;
+        }
         loop {
-            let (watch, server, revision, mail_spec) = self.resolve()?;
-            if checkpoint.revision != revision {
-                checkpoint = Checkpoint {
-                    revision: revision.clone(),
-                    ..Checkpoint::default()
-                };
-            }
-            self.drain(&store).await?;
-            let snapshot = tokio::time::timeout(
-                Duration::from_secs(90),
-                sources::fetch(&watch, server, &checkpoint, mail_spec.as_ref()),
-            )
-            .await
-            .context("event watch poll timed out")??;
-            // A disabled/reconfigured watch cannot publish a completed stale read.
-            let (_, _, current_revision, _) = self.resolve()?;
-            if current_revision != revision {
-                continue;
-            }
-            let mut next = checkpoint.clone();
-            let events = next.observe(&watch, snapshot, Utc::now().timestamp_millis())?;
-            store.save(&next, &events)?;
-            store.poll_succeeded()?;
-            checkpoint = next;
-            self.drain(&store).await?;
+            self.observe_once(&store, &mut checkpoint).await?;
+            let (watch, _, _, _) = self.resolve()?;
             tokio::time::sleep(Duration::from_secs(watch.poll_interval_secs)).await;
         }
     }

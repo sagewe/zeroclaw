@@ -106,7 +106,7 @@ impl EventService {
                                     if let Err(error)=result {
                                         let recorded=Store::open(&path).and_then(|store|store.poll_failed());
                                         let detail=zeroclaw_runtime::agent::loop_::scrub_credentials(&error.to_string());
-                                        zeroclaw_log::record!(WARN,zeroclaw_log::Event::new(module_path!(),zeroclaw_log::Action::Fail).with_attrs(serde_json::json!({"error":detail,"health_recorded":recorded.is_ok()})),"Event polling failed; retrying with bounded backoff");
+                                        zeroclaw_log::record!(WARN,zeroclaw_log::Event::new(module_path!(),zeroclaw_log::Action::Fail).with_attrs(serde_json::json!({"error":detail,"health_recorded":recorded.is_ok()})),"Event observation failed; retrying with bounded backoff");
                                     }
                                 }
                             }
