@@ -182,7 +182,7 @@ kind = "plugin"
 plugin = "home"
 entities = ["light.example"]
 
-[events.rules.home-offline]
+[events.rules.home_offline]
 enabled = true
 source = "home"
 sop = "observe-home-state"
