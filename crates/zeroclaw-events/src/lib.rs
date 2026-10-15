@@ -400,6 +400,12 @@ impl Checkpoint {
                 let initial = self.mail_boundary.is_none();
                 let boundary = *self.mail_boundary.get_or_insert(now);
                 let mut high_water = self.mail_high_water.unwrap_or(now);
+                // Admission must use the same retained window as deduplication.
+                // Search pages can mix recent and historical messages. Once an
+                // old ID is pruned, its timestamp must keep it out on later polls.
+                // Freeze the cutoff at the PREVIOUS watermark so a catch-up
+                // batch does not skip older, still-unobserved mail in that batch.
+                let cutoff = boundary.max(high_water.saturating_sub(sources::MAIL_OVERLAP_MS));
                 for mail in mails {
                     let id = mail["id"].as_str().context("mail ID missing")?;
                     let received = mail["received_at_ms"]
@@ -411,7 +417,7 @@ impl Checkpoint {
                         received <= now + 300_000,
                         "mail timestamp is too far in the future"
                     );
-                    if !initial && received >= boundary && !self.mail_seen.contains_key(id) {
+                    if !initial && received >= cutoff && !self.mail_seen.contains_key(id) {
                         events.push(self.event("email_received", now, mail.clone())?);
                     }
                     self.mail_seen.insert(id.to_string(), received);

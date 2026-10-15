@@ -67,10 +67,18 @@ It does not simulate baseline, deduplication, cooldown, or semantic model judgme
 
 ## History
 
+Mail admission and ID retention use the same five-minute cursor window. Search
+pages may still contain older messages: after their IDs leave the retained set,
+the timestamp cutoff prevents those messages from being emitted again. The
+cutoff is taken from the previous checkpoint, before processing the batch, so
+catch-up can admit previously unobserved mail spanning a longer outage.
+
 History records candidate events that reach the durable outbox. Suppressed
 startup baselines, duplicate messages and ordinary device samples are not
 recorded individually. SOP classification can subsequently mark a candidate as
-ignored in the UI. At most 200 recent records are returned; run links remain
+ignored in the UI. Records quarantined during duplicate-queue repair are shown
+as `deduplicated`, without claiming that those individual records ran a SOP.
+At most 200 recent records are returned; run links remain
 available even if the engine no longer retains a result in its live view.
 
 A crash during dispatch remains ambiguous. Such events are shown as requiring

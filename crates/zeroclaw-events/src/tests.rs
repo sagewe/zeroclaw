@@ -542,3 +542,89 @@ fn native_rule_stores_are_isolated_and_ids_cannot_escape() {
     );
     assert!(service::rule_directory(&config, "../outside").is_err());
 }
+
+#[test]
+fn pruned_mail_ids_do_not_reenter_from_mixed_age_search_results() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let mut checkpoint = Checkpoint {
+        revision: "fixture".into(),
+        ..Default::default()
+    };
+    checkpoint
+        .observe(&watch(), Snapshot::Mail(vec![]), 0)
+        .unwrap();
+    let first = checkpoint
+        .observe(&watch(), Snapshot::Mail(vec![mail("earlier", 1000)]), 1000)
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    let second = checkpoint
+        .observe(
+            &watch(),
+            Snapshot::Mail(vec![mail("latest", 600_000), mail("earlier", 1000)]),
+            600_001,
+        )
+        .unwrap();
+    assert_eq!(second.len(), 1);
+    assert!(
+        !checkpoint.mail_seen.contains_key("earlier"),
+        "old IDs leave the bounded overlap"
+    );
+    store.save(&checkpoint, &second).unwrap();
+    let mut restarted = store.load().unwrap();
+    for now in [610_000, 670_000, 730_000] {
+        let events = restarted
+            .observe(
+                &watch(),
+                Snapshot::Mail(vec![mail("latest", 600_000), mail("earlier", 1000)]),
+                now,
+            )
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "a pruned historical email was emitted again"
+        );
+    }
+    let late = restarted
+        .observe(
+            &watch(),
+            Snapshot::Mail(vec![mail("late", 400_000)]),
+            740_000,
+        )
+        .unwrap();
+    assert_eq!(
+        late.len(),
+        1,
+        "late arrivals within the overlap must still work"
+    );
+}
+
+#[test]
+fn catching_up_a_mail_batch_uses_the_previous_watermark_not_the_newest_item() {
+    let mut checkpoint = Checkpoint::default();
+    checkpoint
+        .observe(&watch(), Snapshot::Mail(vec![]), 0)
+        .unwrap();
+    let events = checkpoint
+        .observe(
+            &watch(),
+            Snapshot::Mail(vec![mail("newest", 900_000), mail("during_outage", 1000)]),
+            900_001,
+        )
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        2,
+        "catch-up cannot discard unobserved mail within the prior cursor range"
+    );
+    assert!(
+        checkpoint
+            .observe(
+                &watch(),
+                Snapshot::Mail(vec![mail("newest", 900_000), mail("during_outage", 1000)]),
+                960_000
+            )
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -9,6 +9,7 @@ export type Locale = 'ar' | 'bn' | 'cs' | 'da' | 'de' | 'el' | 'en' | 'es' | 'fi
 
 const translations: Record<Locale, Record<string, string>> = {
   zh: {
+    "events.disposition.deduplicated": "重复记录已跳过",
     "nav.events": "事件",
     "events.title": "事件",
     "events.description": "监听变化，决定何时行动，追踪每一次处理结果。",
@@ -550,6 +551,7 @@ const translations: Record<Locale, Record<string, string>> = {
   },
 
   en: {
+    "events.disposition.deduplicated": "Duplicate skipped",
     "nav.events": "Events",
     "events.title": "Events",
     "events.description": "Observe changes, decide when to act, and trace every outcome.",
