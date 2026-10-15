@@ -26,6 +26,8 @@ pub struct EventsResponse {
     pub sops: Vec<String>,
     pub connections: Vec<String>,
     pub runtime_enabled: bool,
+    pub integration_instances: Vec<String>,
+    pub resolved_sources: std::collections::BTreeMap<String, Value>,
 }
 #[derive(Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -144,6 +146,19 @@ pub async fn get_events(State(state): State<AppState>, headers: HeaderMap) -> Re
         .filter(|s| s.transport == zeroclaw_config::schema::McpTransport::Http)
         .map(|s| s.name.clone())
         .collect();
+    let integration_instances = config
+        .integration_plugins
+        .instances
+        .keys()
+        .cloned()
+        .collect();
+    let resolved_sources=config.events.sources.iter().map(|(id,source)| {
+        let binding=config.integration_plugins.instances.get(&source.plugin);
+        let valid=source.kind!="plugin" || config.integration_manifest(&source.plugin).is_ok();
+        let enabled=source.enabled && (source.kind!="plugin" || binding.is_some_and(|b|b.enabled) && valid);
+        let connection=if source.kind=="plugin" {binding.map(|b|b.mcp_server.as_str()).unwrap_or("")}else{&source.mcp_server};
+        (id.clone(),json!({"kind":if source.kind=="plugin" {"fastmail"}else{source.kind.as_str()},"enabled":enabled,"mcp_server":connection,"valid":valid}))
+    }).collect();
     Json(EventsResponse {
         config: config.events,
         revision: rev,
@@ -152,6 +167,8 @@ pub async fn get_events(State(state): State<AppState>, headers: HeaderMap) -> Re
         sops,
         connections,
         runtime_enabled: native_available(&state),
+        integration_instances,
+        resolved_sources,
     })
     .into_response()
 }
@@ -178,6 +195,12 @@ pub async fn put_events(
         return error(StatusCode::UNPROCESSABLE_ENTITY, e);
     }
     for source in working.events.sources.values() {
+        if source.kind == "plugin" {
+            if let Err(e) = working.integration_manifest(&source.plugin) {
+                return error(StatusCode::UNPROCESSABLE_ENTITY, e);
+            }
+            continue;
+        }
         if !working.mcp.servers.iter().any(|s| {
             s.name == source.mcp_server
                 && s.transport == zeroclaw_config::schema::McpTransport::Http
@@ -189,7 +212,7 @@ pub async fn put_events(
         }
     }
     for id in working.events.rules.keys() {
-        let watch = match working.events.watch(id) {
+        let watch = match working.event_watch(id) {
             Ok(w) => w,
             Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
         };
@@ -232,6 +255,18 @@ pub async fn put_events(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "SOP owner is disabled or lacks the source connection grant",
             );
+        }
+        if working.events.sources[&working.events.rules[id].source].kind == "plugin" {
+            let spec = match working.event_mail_spec(id) {
+                Ok(s) => s,
+                Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
+            };
+            if !working.integration_poll_allowed(owner, &watch.mcp_server, &spec.tool) {
+                return error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "SOP owner must explicitly auto-approve the integration polling tool",
+                );
+            }
         }
         if !sop.triggers.iter().any(|t|matches!(t,SopTrigger::Channel{channel,alias,..} if channel=="event_watch" && alias.as_deref().is_none_or(|a|a==id))){return error(StatusCode::UNPROCESSABLE_ENTITY,"Target SOP needs an event_watch channel trigger matching this rule ID");}
     }
@@ -297,7 +332,7 @@ pub async fn simulate(
         return e.into_response();
     }
     let config = state.config.read();
-    let watch = match config.events.watch(&body.rule) {
+    let watch = match config.event_watch(&body.rule) {
         Ok(w) => w,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };

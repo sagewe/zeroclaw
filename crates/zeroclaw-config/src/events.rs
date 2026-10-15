@@ -8,6 +8,7 @@ use zeroclaw_macros::Configurable;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(default)]
+#[prefix = "events"]
 pub struct EventsConfig {
     #[nested]
     pub sources: HashMap<String, EventSource>,
@@ -21,6 +22,8 @@ pub struct EventSource {
     pub enabled: bool,
     pub kind: String,
     pub mcp_server: String,
+    /// Integration instance when kind is plugin; the binding owns its MCP connection.
+    pub plugin: String,
     pub poll_interval_secs: u64,
     pub query: String,
     pub entities: Vec<String>,
@@ -31,6 +34,7 @@ impl Default for EventSource {
             enabled: false,
             kind: "fastmail".into(),
             mcp_server: String::new(),
+            plugin: String::new(),
             poll_interval_secs: 60,
             query: "in:inbox".into(),
             entities: Vec::new(),
@@ -105,11 +109,20 @@ impl EventsConfig {
         for (id, source) in &self.sources {
             ensure!(valid_id(id), "invalid event source id");
             ensure!(
-                matches!(source.kind.as_str(), "fastmail" | "home_assistant"),
+                matches!(
+                    source.kind.as_str(),
+                    "fastmail" | "home_assistant" | "plugin"
+                ),
                 "unsupported event source kind"
             );
             ensure!(
-                !source.mcp_server.is_empty(),
+                if source.kind == "plugin" {
+                    valid_id(&source.plugin)
+                        && source.mcp_server.is_empty()
+                        && source.entities.is_empty()
+                } else {
+                    !source.mcp_server.is_empty() && source.plugin.is_empty()
+                },
                 "event source needs a connection"
             );
             ensure!(
@@ -120,7 +133,16 @@ impl EventsConfig {
         }
         for id in self.rules.keys() {
             ensure!(valid_id(id), "invalid event rule id");
-            self.watch(id)?.validate()?;
+            let mut view = self.watch(id)?;
+            if view.source == "plugin" {
+                ensure!(
+                    view.states.is_empty() && view.above.is_none() && view.below.is_none(),
+                    "mail integration does not support device conditions"
+                );
+                view.source = "fastmail".into();
+                view.mcp_server = "integration-binding".into();
+            }
+            view.validate()?;
         }
         Ok(())
     }

@@ -24,8 +24,17 @@ export interface RuleHealth {
 }
 export type EventsState = Omit<
   components["schemas"]["EventsResponse"],
-  "rules" | "records"
-> & { rules: RuleHealth[]; records: EventRecord[] };
+  "rules" | "records" | "resolved_sources"
+> & {
+  rules: RuleHealth[];
+  records: EventRecord[];
+  resolved_sources: Record<string, {
+    kind: string;
+    enabled: boolean;
+    mcp_server: string;
+    valid: boolean;
+  }>;
+};
 export const getEvents = () => apiFetch<EventsState>("/api/event-monitor");
 export const saveEvents = (config: EventsConfig, revision: string) =>
   apiFetch("/api/event-monitor", {

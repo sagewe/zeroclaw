@@ -264,7 +264,7 @@ fn harness(dir: &std::path::Path) -> (EventWatchChannel, zeroclaw_runtime::LiveC
 async fn persisted_event_enters_real_sop_ingress_and_is_not_sent_to_chat() {
     let dir = tempfile::tempdir().unwrap();
     let (watch, _authority) = harness(dir.path());
-    let (_, _, revision) = watch.resolve().unwrap();
+    let (_, _, revision, _) = watch.resolve().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let cp = Checkpoint {
         revision,
@@ -288,7 +288,7 @@ async fn persisted_event_enters_real_sop_ingress_and_is_not_sent_to_chat() {
 async fn revoked_live_watch_or_mcp_grant_prevents_queued_delivery() {
     let dir = tempfile::tempdir().unwrap();
     let (channel, authority) = harness(dir.path());
-    let (_, _, revision) = channel.resolve().unwrap();
+    let (_, _, revision, _) = channel.resolve().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let cp = Checkpoint {
         revision,
@@ -320,7 +320,7 @@ async fn ignored_condition_does_not_block_later_matching_event() {
         }
         engine.set_sops_for_test(vec![sop]);
     }
-    let (_, _, revision) = channel.resolve().unwrap();
+    let (_, _, revision, _) = channel.resolve().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let cp = Checkpoint {
         revision,
@@ -353,7 +353,7 @@ async fn deterministic_observer_run_completes_through_shared_sop_path() {
         sop.steps[0].capability = Some("noop".into());
         engine.set_sops_for_test(vec![sop]);
     }
-    let (_, _, revision) = channel.resolve().unwrap();
+    let (_, _, revision, _) = channel.resolve().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let cp = Checkpoint {
         revision,
@@ -415,7 +415,7 @@ async fn home_http_source_reads_only_explicit_entities() {
         )]),
         ..Default::default()
     };
-    let snapshot = sources::fetch(&watch(), cfg, &Checkpoint::default())
+    let snapshot = sources::fetch(&watch(), cfg, &Checkpoint::default(), None)
         .await
         .unwrap();
     assert!(
@@ -457,7 +457,7 @@ async fn fastmail_source_paginates_and_only_collects_metadata() {
         mail_high_water: Some(0),
         ..Default::default()
     };
-    let Snapshot::Mail(mails) = sources::fetch(&watch, cfg, &cp).await.unwrap() else {
+    let Snapshot::Mail(mails) = sources::fetch(&watch, cfg, &cp, None).await.unwrap() else {
         panic!("wrong snapshot kind")
     };
     assert_eq!(mails.len(), 2);
@@ -626,5 +626,182 @@ fn catching_up_a_mail_batch_uses_the_previous_watermark_not_the_newest_item() {
             )
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn integration_manifest_drives_wire_tool_arguments_and_projection() {
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(|request: &Request| {
+        let req: Value = serde_json::from_slice(&request.body).unwrap();
+        let result = match req["method"].as_str().unwrap() {
+            "initialize" => json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}),
+            "notifications/initialized" => return ResponseTemplate::new(204),
+            "tools/list" => json!({"tools":[{"name":"find_messages","inputSchema":{"type":"object"}}]}),
+            "tools/call" => {
+                assert_eq!(req["params"]["name"], "find_messages");
+                assert_eq!(req["params"]["arguments"]["filter"], "in:inbox");
+                assert_eq!(req["params"]["arguments"]["count"], 50);
+                json!({"structuredContent":{"messages":[{"key":"one","at":"2026-01-01T00:00:01Z","subject":"Fixture","from":[{"email":"sender@example.invalid"}],"body":"private"}],"hasMore":false}})
+            },
+            other => panic!("unexpected MCP operation {other}"),
+        };
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0","id":req["id"],"result":result}))
+    }).mount(&server).await;
+    let mut spec = bundled_fastmail().unwrap().event;
+    spec.tool = "find_messages".into();
+    spec.query_argument = "filter".into();
+    spec.limit_argument = "count".into();
+    spec.items_pointer = "/messages".into();
+    spec.id_pointer = "/key".into();
+    spec.time_pointer = "/at".into();
+    let cfg = McpServerConfig {
+        name: "fixture".into(),
+        transport: McpTransport::Http,
+        url: Some(server.uri()),
+        ..Default::default()
+    };
+    let w = EventWatchConfig {
+        source: "fastmail".into(),
+        ..watch()
+    };
+    let Snapshot::Mail(mails) = sources::fetch(&w, cfg, &Checkpoint::default(), Some(&spec))
+        .await
+        .unwrap()
+    else {
+        panic!("wrong adapter");
+    };
+    assert_eq!(mails[0]["id"], "one");
+    assert_eq!(mails[0]["from"], json!(["sender@example.invalid"]));
+    assert!(mails[0].get("body").is_none());
+}
+
+#[tokio::test]
+async fn integration_migration_preserves_checkpoint_and_pause_blocks_queued_dispatch() {
+    use zeroclaw_config::{
+        events::{EventRule, EventSource},
+        integration_plugins::{IntegrationBinding, load_package, package_root},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (observer, authority) = harness(dir.path());
+    let mut config = authority.snapshot_config();
+    config.config_path = dir.path().join("config.toml");
+    config.channels.event_watch.clear();
+    config.events.sources.insert(
+        "mail".into(),
+        EventSource {
+            enabled: true,
+            kind: "fastmail".into(),
+            mcp_server: "fixture".into(),
+            ..Default::default()
+        },
+    );
+    config.events.rules.insert(
+        "fixture".into(),
+        EventRule {
+            enabled: true,
+            source: "mail".into(),
+            sop: "review".into(),
+            ..Default::default()
+        },
+    );
+    config.agents.get_mut("observer").unwrap().risk_profile = "observer".into();
+    config.risk_profiles.insert(
+        "observer".into(),
+        zeroclaw_config::schema::RiskProfileConfig {
+            auto_approve: vec!["fixture__search_email".into()],
+            ..Default::default()
+        },
+    );
+    authority.publish_for_test(config.clone());
+    let (_, _, legacy_revision, _) = observer.resolve().unwrap();
+    let path = package_root(&config).join("fastmail");
+    std::fs::create_dir_all(&path).unwrap();
+    let mut manifest = bundled_fastmail().unwrap();
+    manifest.mcp.url = "https://example.invalid/mcp".into();
+    // Serialize through JSON -> TOML is unnecessary: use the canonical package bytes and replace only fixture endpoint.
+    let bytes = include_str!("../../zeroclaw-config/integrations/fastmail/integration.toml")
+        .replace("https://api.fastmail.com/mcp", &manifest.mcp.url);
+    std::fs::write(path.join("integration.toml"), bytes).unwrap();
+    let (_, digest) = load_package(&package_root(&config), "fastmail").unwrap();
+    config.integration_plugins.instances.insert(
+        "mail".into(),
+        IntegrationBinding {
+            enabled: true,
+            package: "fastmail".into(),
+            manifest_sha256: digest,
+            mcp_server: "fixture".into(),
+        },
+    );
+    let source = config.events.sources.get_mut("mail").unwrap();
+    source.kind = "plugin".into();
+    source.plugin = "mail".into();
+    source.mcp_server.clear();
+    authority.publish_for_test(config.clone());
+    let (_, _, revision, _) = observer.resolve().unwrap();
+    assert_eq!(
+        legacy_revision, revision,
+        "equivalent migration must not reset mail deduplication"
+    );
+    let store = Store::open(dir.path()).unwrap();
+    let cp = Checkpoint {
+        revision,
+        ..Default::default()
+    };
+    let event = cp
+        .event("email_received", 1, json!({"id":"queued"}))
+        .unwrap();
+    store.save(&cp, &[event]).unwrap();
+    config
+        .integration_plugins
+        .instances
+        .get_mut("mail")
+        .unwrap()
+        .enabled = false;
+    authority.publish_for_test(config.clone());
+    assert!(observer.drain(&store).await.is_err());
+    assert!(store.next().unwrap().is_some());
+    config
+        .integration_plugins
+        .instances
+        .get_mut("mail")
+        .unwrap()
+        .enabled = true;
+    config
+        .risk_profiles
+        .get_mut("observer")
+        .unwrap()
+        .auto_approve
+        .clear();
+    authority.publish_for_test(config);
+    assert!(observer.resolve().is_err());
+}
+
+#[test]
+fn bundled_integration_template_loads_with_narrow_step_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("review-mail");
+    std::fs::create_dir(&path).unwrap();
+    let template = bundled_fastmail().unwrap().template;
+    let expand = |s: String| {
+        s.replace("{{agent}}", "observer")
+            .replace("{{rule}}", "mail")
+            .replace("{{mcp_server}}", "mail")
+            .replace("{{notification_peer}}", "owner")
+    };
+    std::fs::write(path.join("SOP.toml"), expand(template.sop_toml)).unwrap();
+    std::fs::write(path.join("SOP.md"), expand(template.sop_markdown)).unwrap();
+    let sops =
+        zeroclaw_runtime::sop::load_sops_from_directory(dir.path(), SopExecutionMode::Supervised);
+    assert_eq!(sops.len(), 1);
+    assert_eq!(sops[0].steps.len(), 2);
+    assert_eq!(
+        sops[0].steps[0].scope.as_ref().unwrap().allow,
+        Some(vec!["mail__read_email".into()])
+    );
+    assert_eq!(
+        sops[0].steps[1].scope.as_ref().unwrap().allow,
+        Some(vec!["send_via".into()])
     );
 }

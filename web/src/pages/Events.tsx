@@ -32,6 +32,7 @@ const emptySource: EventSource = {
   enabled: false,
   kind: "fastmail",
   mcp_server: "",
+  plugin: "",
   poll_interval_secs: 60,
   query: "in:inbox",
   entities: [],
@@ -133,6 +134,8 @@ export default function Events() {
     setEditor((e) => (e ? { ...e, value: { ...e.value, [key]: value } } : e));
   const sourceRules = (id: string) =>
     Object.entries(data?.config.rules ?? {}).filter(([, r]) => r.source === id);
+  const effectiveSource = (id: string) =>
+    data?.resolved_sources[id] ?? data?.config.sources[id];
   const health = (id: string) => data?.rules.find((r) => r.id === id);
   const lastPoll = Math.max(
     0,
@@ -189,7 +192,7 @@ export default function Events() {
                 t("events.active_rules"),
                 String(
                   Object.values(data.config.rules).filter(
-                    (r) => r.enabled && data.config.sources[r.source]?.enabled,
+                    (r) => r.enabled && effectiveSource(r.source)?.enabled,
                   ).length,
                 ),
                 Workflow,
@@ -255,14 +258,21 @@ export default function Events() {
                   </div>
                   {Object.entries(data.config.sources).map(([id, source]) => {
                     const rules = sourceRules(id);
-                    const status = sourceStatus(
-                      source.enabled,
-                      source.poll_interval_secs,
-                      rules.map(([rid, r]) => ({
-                        enabled: r.enabled,
-                        ...health(rid),
-                      })),
-                    );
+                    const display = data.resolved_sources[id] ?? {
+                      ...source,
+                      valid: true,
+                    };
+                    const status =
+                      display.valid === false
+                        ? "error"
+                        : sourceStatus(
+                            display.enabled,
+                            source.poll_interval_secs,
+                            rules.map(([rid, r]) => ({
+                              enabled: r.enabled,
+                              ...health(rid),
+                            })),
+                          );
                     const recent = Math.max(
                       0,
                       ...rules.map(([rid]) => health(rid)?.last_poll_ms ?? 0),
@@ -272,7 +282,7 @@ export default function Events() {
                         <div className="flex justify-between gap-3">
                           <div className="flex gap-3 items-center">
                             <div className="p-2.5 rounded-xl bg-pc-elevated text-pc-accent">
-                              {source.kind === "fastmail" ? (
+                              {display.kind === "fastmail" ? (
                                 <Mail size={22} />
                               ) : (
                                 <Radio size={22} />
@@ -283,7 +293,7 @@ export default function Events() {
                                 {id}
                               </h2>
                               <p className="text-xs text-pc-text-secondary mt-1">
-                                {source.kind === "fastmail"
+                                {display.kind === "fastmail"
                                   ? "Fastmail"
                                   : "Home Assistant"}{" "}
                                 · {t("events.polling")}{" "}
@@ -311,7 +321,7 @@ export default function Events() {
                               {t("events.scope")}
                             </p>
                             <p className="text-pc-text break-words">
-                              {source.kind === "fastmail"
+                              {display.kind === "fastmail"
                                 ? source.query
                                 : source.entities.join(", ")}
                             </p>
@@ -335,6 +345,14 @@ export default function Events() {
                           <p className="text-sm text-status-warning">
                             {t("events.connection_error")}
                           </p>
+                        )}
+                        {source.kind === "plugin" && (
+                          <Link
+                            className="block text-xs text-pc-accent"
+                            to="/plugins/integrations"
+                          >
+                            {t("integrations_plugin.package")} · {source.plugin}
+                          </Link>
                         )}
                         <div className="flex gap-2 pt-2 border-t border-pc-border">
                           <Button
@@ -366,11 +384,11 @@ export default function Events() {
                           <Link
                             to={
                               "/config/mcp.servers/" +
-                              encodeURIComponent(source.mcp_server)
+                              encodeURIComponent(display.mcp_server)
                             }
                             className="ml-auto text-xs self-center text-pc-text-secondary"
                           >
-                            {t("events.connection")} · {source.mcp_server}
+                            {t("events.connection")} · {display.mcp_server}
                           </Link>
                         </div>
                       </Card>
@@ -404,14 +422,14 @@ export default function Events() {
                         <Badge
                           tone={
                             rule.enabled &&
-                            data.config.sources[rule.source]?.enabled
+                            effectiveSource(rule.source)?.enabled
                               ? "ok"
                               : "neutral"
                           }
                         >
                           {t(
                             rule.enabled &&
-                              data.config.sources[rule.source]?.enabled
+                              effectiveSource(rule.source)?.enabled
                               ? "events.enabled"
                               : "events.paused",
                           )}
@@ -423,7 +441,7 @@ export default function Events() {
                         </span>
                         <ArrowRight size={14} className="text-pc-text-muted" />
                         <span className="text-pc-text-secondary">
-                          {data.config.sources[rule.source]?.kind === "fastmail"
+                          {effectiveSource(rule.source)?.kind === "fastmail"
                             ? t("events.new_mail")
                             : rule.states.length
                               ? rule.states.join(" / ")
@@ -442,7 +460,7 @@ export default function Events() {
                           {rule.sop}
                         </Link>
                       </div>
-                      {data.config.sources[rule.source]?.kind ===
+                      {effectiveSource(rule.source)?.kind ===
                         "home_assistant" && (
                         <p className="text-xs text-pc-text-secondary">
                           {t("events.duration")} {rule.for_secs}s ·{" "}
@@ -512,9 +530,9 @@ export default function Events() {
                       <p className="text-xs text-pc-text-secondary">
                         {t("events.simulate_hint")}
                       </p>
-                      {data.config.sources[
-                        data.config.rules[test.rule]?.source ?? ""
-                      ]?.kind === "home_assistant" && (
+                      {effectiveSource(
+                        data.config.rules[test.rule]?.source ?? "",
+                      )?.kind === "home_assistant" && (
                         <div className="grid grid-cols-2 gap-3">
                           <Field label={t("events.sample_state")}>
                             <input
@@ -720,22 +738,56 @@ export default function Events() {
                         <select
                           className={input}
                           value={(editor.value as EventSource).kind}
-                          onChange={(e) => field("kind", e.target.value)}
+                          onChange={(e) =>
+                            setEditor({
+                              ...editor,
+                              value: {
+                                ...editor.value,
+                                kind: e.target.value,
+                                mcp_server: "",
+                                plugin: "",
+                                entities: [],
+                              },
+                            })
+                          }
                         >
+                          <option value="plugin">
+                            {t("integrations_plugin.package")}
+                          </option>
                           <option value="fastmail">Fastmail</option>
                           <option value="home_assistant">Home Assistant</option>
                         </select>
                       </Field>
-                      <Field label={t("events.connection")}>
+                      <Field
+                        label={t(
+                          (editor.value as EventSource).kind === "plugin"
+                            ? "integrations_plugin.instances"
+                            : "events.connection",
+                        )}
+                      >
                         <select
                           className={input}
                           required
-                          value={(editor.value as EventSource).mcp_server}
-                          onChange={(e) => field("mcp_server", e.target.value)}
+                          value={
+                            (editor.value as EventSource).kind === "plugin"
+                              ? (editor.value as EventSource).plugin
+                              : (editor.value as EventSource).mcp_server
+                          }
+                          onChange={(e) =>
+                            field(
+                              (editor.value as EventSource).kind === "plugin"
+                                ? "plugin"
+                                : "mcp_server",
+                              e.target.value,
+                            )
+                          }
                         >
                           <option value="">{t("events.select")}</option>
-                          {data.connections.map((c) => (
-                            <option key={c}>{c}</option>
+                          {((editor.value as EventSource).kind === "plugin"
+                            ? data.integration_instances
+                            : data.connections
+                          ).map((id) => (
+                            <option key={id}>{id}</option>
                           ))}
                         </select>
                       </Field>
@@ -754,7 +806,8 @@ export default function Events() {
                           }
                         />
                       </Field>
-                      {(editor.value as EventSource).kind === "fastmail" ? (
+                      {(editor.value as EventSource).kind !==
+                      "home_assistant" ? (
                         <Field label={t("events.query")}>
                           <input
                             className={input}
@@ -808,7 +861,7 @@ export default function Events() {
                       <p className="text-xs text-pc-text-muted">
                         {t("events.sop_hint")}
                       </p>
-                      {data.config.sources[(editor.value as EventRule).source]
+                      {effectiveSource((editor.value as EventRule).source)
                         ?.kind === "home_assistant" && (
                         <>
                           <Field label={t("events.states")}>

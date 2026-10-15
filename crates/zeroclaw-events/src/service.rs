@@ -46,7 +46,7 @@ impl EventService {
                         .rules
                         .keys()
                         .filter_map(|id| {
-                            let watch = config.events.watch(id).ok()?;
+                            let watch = config.event_watch(id).ok()?;
                             if !watch.enabled {
                                 return None;
                             }

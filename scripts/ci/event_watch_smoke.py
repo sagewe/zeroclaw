@@ -5,6 +5,8 @@ Usage: python3 scripts/ci/event_watch_smoke.py --binary target/debug/zeroclaw
 Build with channel-event-watch and gateway. No real accounts or external model calls.
 """
 import argparse
+import hashlib
+from datetime import datetime, timezone
 import json
 import os
 import socket
@@ -12,6 +14,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import tomllib
 import time
 import urllib.request
 import urllib.error
@@ -23,7 +26,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--native", action="store_true")
+    parser.add_argument("--plugin", action="store_true", help="Exercise the Fastmail integration package")
     args = parser.parse_args()
+    if args.plugin:
+        args.native = True
     binary = args.binary.resolve()
     state = {"value": "on", "reads": 0, "model_calls": 0, "unexpected": []}
 
@@ -70,7 +76,15 @@ def main():
             if method == "initialize":
                 result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "fixture", "version": "1"}}
             elif method == "tools/list":
-                result = {"tools": []}
+                result = {"tools": [{"name":"search_email", "description":"Fixture metadata", "inputSchema":{"type":"object"}}] if args.plugin else []}
+            elif method == "tools/call" and args.plugin:
+                assert request["params"]["name"] == "search_email"
+                assert request["params"]["arguments"]["query"] == "in:inbox"
+                state["reads"] += 1
+                messages = [{"id":"baseline", "receivedAt":"2026-01-01T00:00:00Z", "subject":"Baseline fixture"}]
+                if state["value"] == "unavailable":
+                    messages.append({"id":"new-message", "receivedAt":datetime.now(timezone.utc).isoformat(), "subject":"Action fixture"})
+                result = {"structuredContent":{"results":messages, "hasMore":False}}
             else:
                 state["unexpected"].append(str(method))
                 result = {}
@@ -161,6 +175,30 @@ enabled = false
             start = config.index('[channels.event_watch.fixture]')
             end = config.index('[[mcp.servers]]', start)
             config = config[:start] + '[events.sources.ha]\nenabled = true\nkind = "home_assistant"\nmcp_server = "fixture"\npoll_interval_secs = 10\nentities = ["light.example"]\n[events.rules.fixture]\nenabled = true\nsource = "ha"\nsop = "review"\nstates = ["unavailable"]\nfor_secs = 0\ncooldown_secs = 0\n' + config[end:]
+            if args.plugin:
+                package = root / "shared/integration-plugins/fastmail"
+                package.mkdir(parents=True)
+                manifest = (Path(__file__).resolve().parents[2] / "crates/zeroclaw-config/integrations/fastmail/integration.toml").read_text().replace("https://api.fastmail.com/mcp", f"http://127.0.0.1:{fixture.server_port}/mcp")
+                (package / "integration.toml").write_text(manifest)
+                digest = hashlib.sha256(manifest.encode()).hexdigest()
+                config = config.replace('[risk_profiles.observer]', '[risk_profiles.observer]\nauto_approve = ["fixture__search_email"]')
+                start = config.index('[events.sources.ha]')
+                end = config.index('[[mcp.servers]]', start)
+                config = config[:start] + f'''[integration_plugins.instances.mail]
+enabled = true
+package = "fastmail"
+manifest_sha256 = "{digest}"
+mcp_server = "fixture"
+[events.sources.mail]
+enabled = true
+kind = "plugin"
+plugin = "mail"
+poll_interval_secs = 10
+[events.rules.fixture]
+enabled = true
+source = "mail"
+sop = "review"
+''' + config[end:]
             path.write_text(config)
         env = {k: v for k, v in os.environ.items() if not k.startswith("ZEROCLAW_")}
         env["NO_PROXY"] = "127.0.0.1,localhost"
@@ -204,8 +242,12 @@ enabled = false
                         row = connection.execute("SELECT data FROM checkpoint WHERE id=1").fetchone()
                     except sqlite3.OperationalError:
                         continue
-                    if row and json.loads(row[0]).get("home", {}).get("light.example", {}).get("state") == "on":
-                        return True
+                    if row:
+                        checkpoint = json.loads(row[0])
+                        if args.plugin and checkpoint.get("mail_boundary") is not None:
+                            return True
+                        if not args.plugin and checkpoint.get("home", {}).get("light.example", {}).get("state") == "on":
+                            return True
             return False
 
         try:
@@ -238,18 +280,27 @@ enabled = false
                     auth = {"Authorization":"Bearer " + token}
                     overview = api("/api/event-monitor", headers=auth)
                     assert overview["rules"][0]["last_poll_ms"] is not None
-                    assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"on","duration_secs":100}, auth)["matched"] is False
+                    assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"on","duration_secs":100}, auth)["matched"] is args.plugin
                     assert api("/api/event-monitor/simulate", {"rule":"fixture","state":"unavailable","duration_secs":100}, auth)["matched"] is True
                     assert not runs(), "simulation started a SOP"
-                    overview["config"]["sources"]["ha"]["enabled"] = False
-                    api("/api/event-monitor", {"config":overview["config"],"revision":overview["revision"]}, auth, "PUT")
+                    endpoint = "/api/integration-plugins" if args.plugin else "/api/event-monitor"
+                    setting = "instances" if args.plugin else "sources"
+                    instance = "mail" if args.plugin else "ha"
+                    overview = api(endpoint, headers=auth)
+                    overview["config"][setting][instance]["enabled"] = False
+                    api(endpoint, {"config":overview["config"],"revision":overview["revision"]}, auth, "PUT")
+                    saved = tomllib.loads((root / "config.toml").read_text())
+                    section = "integration_plugins" if args.plugin else "events"
+                    assert saved[section][setting][instance]["enabled"] is False, "pause was not persisted"
                     time.sleep(3)
                     paused_reads = state["reads"]
                     time.sleep(11)
                     assert state["reads"] == paused_reads, "paused source kept polling"
-                    fresh = api("/api/event-monitor", headers=auth)
-                    fresh["config"]["sources"]["ha"]["enabled"] = True
-                    api("/api/event-monitor", {"config":fresh["config"],"revision":fresh["revision"]}, auth, "PUT")
+                    fresh = api(endpoint, headers=auth)
+                    fresh["config"][setting][instance]["enabled"] = True
+                    api(endpoint, {"config":fresh["config"],"revision":fresh["revision"]}, auth, "PUT")
+                    saved = tomllib.loads((root / "config.toml").read_text())
+                    assert saved[section][setting][instance]["enabled"] is True, "resume was not persisted"
                     wait_until(lambda: state["reads"] > paused_reads)
                 warmed_up_calls = state["model_calls"]
                 assert not runs(), "baseline unexpectedly started a run"
@@ -271,7 +322,16 @@ enabled = false
                 wait_until(lambda: state["reads"] >= before + 2)
                 assert len(runs()) == 1, "restart replayed a delivered event"
                 assert not state["unexpected"], state["unexpected"]
-                print("PASS: daemon baseline -> state transition -> completed SOP -> restart without replay")
+                if args.plugin:
+                    package_file = root / "shared/integration-plugins/fastmail/integration.toml"
+                    package_file.write_text(package_file.read_text() + "\n# unapproved change\n")
+                    time.sleep(3)
+                    paused_reads = state["reads"]
+                    time.sleep(11)
+                    assert state["reads"] == paused_reads, "unapproved package kept polling"
+                    catalog = api("/api/integration-plugins", headers=auth)
+                    assert "mail" in catalog["invalid_instances"]
+                print("PASS: daemon baseline -> pause/resume -> event -> completed SOP -> restart without replay" + (" -> tamper stops polling" if args.plugin else ""))
         except Exception:
             print(diagnostic())
             if log_path.exists():

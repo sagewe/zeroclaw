@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use zeroclaw_api::channel::{Channel, ChannelMessage, ChannelSopTopic, SendMessage};
 use zeroclaw_config::event_watch::EventWatchConfig;
+use zeroclaw_config::integration_plugins::{MailPollSpec, bundled_fastmail};
 use zeroclaw_config::live::LiveConfigHandle;
 use zeroclaw_config::schema::{McpServerConfig, McpTransport};
 use zeroclaw_runtime::sop::SopDriverSink;
@@ -72,11 +73,18 @@ impl EventWatchChannel {
 
     /// Resolve grants from the currently published config before every fetch
     /// and again before every dispatch. Never retain a long-lived policy copy.
-    fn resolve(&self) -> Result<(EventWatchConfig, McpServerConfig, String)> {
+    fn resolve(
+        &self,
+    ) -> Result<(
+        EventWatchConfig,
+        McpServerConfig,
+        String,
+        Option<MailPollSpec>,
+    )> {
         let (watch, native) = {
             let config = self.live.read();
             if config.events.rules.contains_key(&self.alias) {
-                (config.events.watch(&self.alias)?, true)
+                (config.event_watch(&self.alias)?, true)
             } else {
                 (
                     config
@@ -119,7 +127,7 @@ impl EventWatchChannel {
         );
         ensure!(
             if native {
-                config.events.watch(&self.alias).ok().as_ref() == Some(&watch)
+                config.event_watch(&self.alias).ok().as_ref() == Some(&watch)
             } else {
                 config.channels.event_watch.get(&self.alias) == Some(&watch)
             },
@@ -154,12 +162,35 @@ impl EventWatchChannel {
                 .min(1024 * 1024),
         );
         server.tool_timeout_secs = Some(server.tool_timeout_secs.unwrap_or(30).min(30));
+        let mail_spec = if watch.source == "fastmail" {
+            Some(config.event_mail_spec(&self.alias)?)
+        } else {
+            None
+        };
+        if native
+            && config.events.sources[&config.events.rules[&self.alias].source].kind == "plugin"
+        {
+            let spec = mail_spec
+                .as_ref()
+                .context("integration mail adapter missing")?;
+            ensure!(
+                config.integration_poll_allowed(&owner, &watch.mcp_server, &spec.tool),
+                "integration poll tool must be explicitly auto-approved by the owning agent"
+            );
+        }
         // Credential/endpoint changes may switch accounts; invalidate the old
         // baseline and queued work without storing the credential in the DB.
-        let revision = hex::encode(Sha256::digest(serde_json::to_vec(&(
+        let mut revision = hex::encode(Sha256::digest(serde_json::to_vec(&(
             &watch, &server, &owner,
         ))?));
-        Ok((watch, server, revision))
+        // Preserve the existing Fastmail checkpoint during migration when the
+        // wire mapping is unchanged. Other approved mappings own a new cursor.
+        if let Some(spec) = &mail_spec
+            && *spec != bundled_fastmail()?.event
+        {
+            revision = hex::encode(Sha256::digest(serde_json::to_vec(&(&revision, spec))?));
+        }
+        Ok((watch, server, revision, mail_spec))
     }
 
     async fn drain(&self, store: &Store) -> Result<()> {
@@ -167,7 +198,7 @@ impl EventWatchChannel {
             let Some(event) = store.next()? else {
                 return Ok(());
             };
-            let (watch, _, revision) = self.resolve()?;
+            let (watch, _, revision, _) = self.resolve()?;
             if event.revision != revision {
                 store.mark(&event.id, "superseded")?;
                 continue;
@@ -268,7 +299,7 @@ impl Channel for EventWatchChannel {
             );
         }
         loop {
-            let (watch, server, revision) = self.resolve()?;
+            let (watch, server, revision, mail_spec) = self.resolve()?;
             if checkpoint.revision != revision {
                 checkpoint = Checkpoint {
                     revision: revision.clone(),
@@ -278,12 +309,12 @@ impl Channel for EventWatchChannel {
             self.drain(&store).await?;
             let snapshot = tokio::time::timeout(
                 Duration::from_secs(90),
-                sources::fetch(&watch, server, &checkpoint),
+                sources::fetch(&watch, server, &checkpoint, mail_spec.as_ref()),
             )
             .await
             .context("event watch poll timed out")??;
             // A disabled/reconfigured watch cannot publish a completed stale read.
-            let (_, _, current_revision) = self.resolve()?;
+            let (_, _, current_revision, _) = self.resolve()?;
             if current_revision != revision {
                 continue;
             }

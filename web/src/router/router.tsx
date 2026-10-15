@@ -12,6 +12,7 @@ import {
   Dashboard,
   Doctor,
   Integrations,
+  IntegrationPlugins,
   Logs,
   Pairing,
   Plugins,
@@ -58,6 +59,7 @@ export const Router = () => (
         <Route path="/runs" element={<Runs />} />
         <Route path="/runs/:sop/:runId" element={<RunDetail />} />
         <Route path="/integrations" element={<Integrations />} />
+        <Route path="/plugins/integrations" element={<IntegrationPlugins />} />
         <Route path="/plugins" element={<Plugins />} />
         <Route path="/memory" element={<Navigate to="/?tab=memories" replace />} />
         <Route path="/config" element={<Config />} />

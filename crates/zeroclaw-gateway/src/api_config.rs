@@ -421,6 +421,7 @@ fn channel_generation_projection(config: &zeroclaw_config::schema::Config) -> se
         .collect();
     serde_json::json!({
         "channels": &config.channels,
+        "integration_plugins": &config.integration_plugins,
         "peer_groups": &config.peer_groups,
         "agents": agents,
     })

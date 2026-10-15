@@ -53,3 +53,5 @@ pub mod security {
 }
 
 pub mod events;
+
+pub mod integration_plugins;

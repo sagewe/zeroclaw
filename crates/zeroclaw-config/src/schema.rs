@@ -336,6 +336,11 @@ pub struct Config {
     #[nested]
     pub events: crate::events::EventsConfig,
 
+    /// Operator-approved declarative integration packages.
+    #[serde(default)]
+    #[nested]
+    pub integration_plugins: crate::integration_plugins::IntegrationPluginsConfig,
+
     /// Memory backend configuration: sqlite, markdown, embeddings (`[memory]`).
     #[serde(default)]
     #[nested]
@@ -5217,6 +5222,7 @@ impl Config {
         // `[mcp.servers]` entry is not granted.
         granted
             .into_iter()
+            .filter(|name| self.integration_allows_mcp(name))
             .filter_map(|name| self.mcp.servers.iter().find(|s| s.name == name).cloned())
             .collect()
     }
@@ -21152,6 +21158,7 @@ impl Default for Config {
             cron: HashMap::new(),
             acp: AcpConfig::default(),
             events: crate::events::EventsConfig::default(),
+            integration_plugins: crate::integration_plugins::IntegrationPluginsConfig::default(),
             channels: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),
@@ -23959,7 +23966,17 @@ impl Config {
     /// Called after TOML deserialization and env-override application to catch
     /// obviously invalid values early instead of failing at arbitrary runtime points.
     pub fn validate(&self) -> Result<()> {
+        self.integration_plugins.validate()?;
         self.events.validate()?;
+        for source in self.events.sources.values().filter(|s| s.kind == "plugin") {
+            anyhow::ensure!(
+                self.integration_plugins
+                    .instances
+                    .contains_key(&source.plugin),
+                "event integration instance missing"
+            );
+        }
+
         for id in self.events.rules.keys() {
             anyhow::ensure!(
                 !self.channels.event_watch.contains_key(id),
@@ -32989,6 +33006,7 @@ auto_save = true
             cron: HashMap::new(),
             acp: AcpConfig::default(),
             events: crate::events::EventsConfig::default(),
+            integration_plugins: crate::integration_plugins::IntegrationPluginsConfig::default(),
             channels: ChannelsConfig {
                 cli: true,
                 telegram: HashMap::from([(
@@ -34253,6 +34271,7 @@ default_temperature = 0.7
             cron: HashMap::new(),
             acp: AcpConfig::default(),
             events: crate::events::EventsConfig::default(),
+            integration_plugins: crate::integration_plugins::IntegrationPluginsConfig::default(),
             channels: ChannelsConfig::default(),
             memory: MemoryConfig::default(),
             storage: StorageConfig::default(),

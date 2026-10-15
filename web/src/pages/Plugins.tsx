@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { Puzzle, TriangleAlert } from "lucide-react";
 
@@ -124,6 +125,13 @@ export default function Plugins() {
           </Badge>
         }
       />
+
+      <Link
+        to="/plugins/integrations"
+        className="block rounded-lg border border-pc-border p-4 text-pc-accent"
+      >
+        {t("integrations_plugin.title")} → {t("integrations_plugin.capabilities")}
+      </Link>
 
       {!response.wasm_plugins_available && (
         <div

@@ -10,12 +10,49 @@ use super::{Checkpoint, Snapshot};
 const MAX_BODY: usize = 1024 * 1024;
 pub(super) const MAIL_OVERLAP_MS: i64 = 300_000;
 
+use async_trait::async_trait;
+use zeroclaw_config::integration_plugins::{MailPollSpec, bundled_fastmail};
+
+#[async_trait]
+pub(crate) trait EventSourceAdapter: Send + Sync {
+    async fn fetch(
+        &self,
+        watch: &EventWatchConfig,
+        server: McpServerConfig,
+        checkpoint: &Checkpoint,
+    ) -> Result<Snapshot>;
+}
+struct HomeAssistantAdapter;
+struct McpMailAdapter<'a> {
+    spec: &'a MailPollSpec,
+}
+
 pub(super) async fn fetch(
     watch: &EventWatchConfig,
     server: McpServerConfig,
     checkpoint: &Checkpoint,
+    mail_spec: Option<&MailPollSpec>,
 ) -> Result<Snapshot> {
-    if watch.source == "home_assistant" {
+    match watch.source.as_str() {
+        "home_assistant" => HomeAssistantAdapter.fetch(watch, server, checkpoint).await,
+        "fastmail" => {
+            let default = bundled_fastmail()?;
+            let adapter = McpMailAdapter {
+                spec: mail_spec.unwrap_or(&default.event),
+            };
+            adapter.fetch(watch, server, checkpoint).await
+        }
+        _ => anyhow::bail!("unknown event source adapter"),
+    }
+}
+#[async_trait]
+impl EventSourceAdapter for HomeAssistantAdapter {
+    async fn fetch(
+        &self,
+        watch: &EventWatchConfig,
+        server: McpServerConfig,
+        _checkpoint: &Checkpoint,
+    ) -> Result<Snapshot> {
         let mut url = url::Url::parse(server.url.as_deref().context("MCP URL missing")?)?;
         ensure!(
             matches!(url.scheme(), "http" | "https")
@@ -63,94 +100,131 @@ pub(super) async fn fetch(
             ensure!(state.len() <= 128, "entity state too large");
             states.push((entity.clone(), state.to_string()));
         }
-        return Ok(Snapshot::Home(states));
+        Ok(Snapshot::Home(states))
     }
-
-    // A fresh short-lived connection each poll resolves rotated credentials and
-    // endpoint changes from canonical config, rather than caching live policy.
-    let client = McpServer::connect(server).await?;
-    let mut mails = Vec::new();
-    let mut cursor: Option<String> = None;
-    let since = checkpoint.mail_high_water.map(|v| v - MAIL_OVERLAP_MS);
-    for page in 0..20 {
-        let mut args = json!({"query": watch.query, "limit": 50});
-        if let Some(cursor) = &cursor {
-            args["cursor"] = Value::String(cursor.clone());
-        }
-        let raw = client.call_tool("search_email", args).await?;
-        let result = tool_data(raw)?;
-        let batch = result["results"]
-            .as_array()
-            .context("Fastmail search response has no results")?;
-        let mut older = !batch.is_empty();
-        for mail in batch {
-            let received = mail["receivedAt"]
-                .as_str()
-                .context("mail has no receivedAt")?;
-            let timestamp = DateTime::parse_from_rfc3339(received)?.timestamp_millis();
-            older &= since.is_some_and(|cutoff| timestamp < cutoff);
-            let id = mail["id"].as_str().context("mail has no ID")?;
-            ensure!(!id.is_empty() && id.len() <= 256, "invalid mail ID");
-            // No body, preview, attachments or arbitrary upstream fields enter an event.
-            let subject: String = mail["subject"]
-                .as_str()
-                .unwrap_or("")
-                .chars()
-                .take(512)
-                .collect();
-            let from: Vec<String> = mail["from"]
+}
+#[async_trait]
+impl EventSourceAdapter for McpMailAdapter<'_> {
+    async fn fetch(
+        &self,
+        watch: &EventWatchConfig,
+        server: McpServerConfig,
+        checkpoint: &Checkpoint,
+    ) -> Result<Snapshot> {
+        self.spec.validate()?;
+        // A fresh short-lived connection each poll resolves rotated credentials and
+        // endpoint changes from canonical config, rather than caching live policy.
+        let client = McpServer::connect(server).await?;
+        let mut mails = Vec::new();
+        let mut cursor: Option<String> = None;
+        let since = checkpoint.mail_high_water.map(|v| v - MAIL_OVERLAP_MS);
+        for page in 0..20 {
+            let mut args = json!({});
+            args[&self.spec.query_argument] = json!(watch.query);
+            args[&self.spec.limit_argument] = json!(50);
+            if let Some(cursor) = &cursor {
+                args[&self.spec.cursor_argument] = Value::String(cursor.clone());
+            }
+            let raw = client.call_tool(&self.spec.tool, args).await?;
+            let result = tool_data(raw)?;
+            let batch = result
+                .pointer(&self.spec.items_pointer)
+                .context("mail items path missing")?
                 .as_array()
-                .into_iter()
-                .flatten()
-                .take(5)
-                .filter_map(|sender| sender["email"].as_str())
-                .map(|email| email.chars().take(254).collect())
-                .collect();
-            mails.push(
+                .context("Mail MCP search response has no results")?;
+            let mut older = !batch.is_empty();
+            for mail in batch {
+                let received = mail
+                    .pointer(&self.spec.time_pointer)
+                    .context("mail timestamp path missing")?
+                    .as_str()
+                    .context("mail has no receivedAt")?;
+                let timestamp = DateTime::parse_from_rfc3339(received)?.timestamp_millis();
+                older &= since.is_some_and(|cutoff| timestamp < cutoff);
+                let id = mail
+                    .pointer(&self.spec.id_pointer)
+                    .context("mail ID path missing")?
+                    .as_str()
+                    .context("mail has no ID")?;
+                ensure!(!id.is_empty() && id.len() <= 256, "invalid mail ID");
+                // No body, preview, attachments or arbitrary upstream fields enter an event.
+                let subject: String = mail
+                    .pointer(&self.spec.subject_pointer)
+                    .unwrap_or(&Value::Null)
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(512)
+                    .collect();
+                let from: Vec<String> = mail
+                    .pointer(&self.spec.senders_pointer)
+                    .unwrap_or(&Value::Null)
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(5)
+                    .filter_map(|sender| {
+                        sender
+                            .pointer(&self.spec.sender_address_pointer)
+                            .and_then(Value::as_str)
+                    })
+                    .map(|email| email.chars().take(254).collect())
+                    .collect();
+                mails.push(
                 json!({"id": id, "received_at_ms": timestamp, "subject": subject, "from": from}),
             );
+            }
+            if checkpoint.mail_boundary.is_none()
+                || older
+                || result
+                    .pointer(&self.spec.more_pointer)
+                    .unwrap_or(&Value::Null)
+                    .as_bool()
+                    == Some(false)
+            {
+                return Ok(Snapshot::Mail(mails));
+            }
+            ensure!(
+                result
+                    .pointer(&self.spec.more_pointer)
+                    .unwrap_or(&Value::Null)
+                    .as_bool()
+                    == Some(true),
+                "Mail MCP pagination state missing"
+            );
+            let next = result
+                .pointer(&self.spec.cursor_pointer)
+                .unwrap_or(&Value::Null)
+                .as_str()
+                .context("Mail MCP pagination cursor missing")?
+                .to_string();
+            ensure!(
+                Some(&next) != cursor.as_ref(),
+                "Mail MCP cursor did not advance"
+            );
+            cursor = Some(next);
+            ensure!(
+                page < 19,
+                "Mail MCP overlap exceeds 1000 messages; checkpoint not advanced"
+            );
         }
-        if checkpoint.mail_boundary.is_none() || older || result["hasMore"].as_bool() == Some(false)
-        {
-            return Ok(Snapshot::Mail(mails));
-        }
-        ensure!(
-            result["hasMore"].as_bool() == Some(true),
-            "Fastmail pagination state missing"
-        );
-        let next = result["nextCursor"]
-            .as_str()
-            .context("Fastmail pagination cursor missing")?
-            .to_string();
-        ensure!(
-            Some(&next) != cursor.as_ref(),
-            "Fastmail cursor did not advance"
-        );
-        cursor = Some(next);
-        ensure!(
-            page < 19,
-            "Fastmail overlap exceeds 1000 messages; checkpoint not advanced"
-        );
+        anyhow::bail!("Mail MCP pagination did not complete")
     }
-    anyhow::bail!("Fastmail pagination did not complete")
 }
 
 fn tool_data(raw: Value) -> Result<Value> {
     ensure!(
         raw.get("isError").and_then(Value::as_bool) != Some(true),
-        "Fastmail query failed"
+        "Mail query failed"
     );
-    if let Some(value) = raw
-        .get("structuredContent")
-        .filter(|v| v.get("results").is_some())
-    {
+    if let Some(value) = raw.get("structuredContent").filter(|v| v.is_object()) {
         return Ok(value.clone());
     }
     let text = raw["content"]
         .as_array()
         .and_then(|items| items.iter().find_map(|item| item["text"].as_str()))
-        .context("Fastmail query has no structured content")?;
-    ensure!(text.len() <= MAX_BODY, "Fastmail result too large");
+        .context("Mail query has no structured content")?;
+    ensure!(text.len() <= MAX_BODY, "Mail result too large");
     Ok(serde_json::from_str(text)?)
 }
 
