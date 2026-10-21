@@ -29,7 +29,7 @@ fn endpoint(server: &McpServerConfig) -> Result<url::Url> {
             .context("Home Assistant URL missing")?,
     )?;
     ensure!(
-        url.path() == "/api/mcp"
+        matches!(url.path(), "/api/mcp" | "/api/websocket")
             && url.username().is_empty()
             && url.password().is_none()
             && url.query().is_none()

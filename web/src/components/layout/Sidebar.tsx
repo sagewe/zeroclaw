@@ -5,6 +5,7 @@ import { railAsideStyle, railLinkClassName, railNavClassName } from './sidebarRa
 import { SidebarNavLink } from './SidebarNavLink';
 import {
   Activity,
+  House,
   Radio,
   ArrowDownToLine,
   Blocks,
@@ -50,7 +51,7 @@ interface NavGroup {
 const navGroups: NavGroup[] = [
   {
     headingKey: 'nav.group.home',
-    items: [{ to: '/', icon: LayoutDashboard, labelKey: 'nav.dashboard' }],
+    items: [{ to: '/', icon: LayoutDashboard, labelKey: 'nav.dashboard' }, { to: '/home', icon: House, labelKey: 'home.title' }],
   },
   {
     headingKey: 'nav.group.chat',

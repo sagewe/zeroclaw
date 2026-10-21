@@ -169,7 +169,7 @@ pub async fn get_events(State(state): State<AppState>, headers: HeaderMap) -> Re
         let manifest = if source.kind == "plugin" { config.integration_manifest(&source.plugin).ok() } else { None };
         let valid=source.kind!="plugin" || manifest.is_some();
         let enabled=source.enabled && (source.kind!="plugin" || binding.is_some_and(|b|b.enabled) && valid);
-        let connection=if source.kind=="plugin" {binding.map(|b|b.mcp_server.as_str()).unwrap_or("")}else{&source.mcp_server};
+        let connection=if source.kind=="plugin" {binding.map(|b|if b.cli_command.is_empty(){b.mcp_server.as_str()}else{source.plugin.as_str()}).unwrap_or("")}else{&source.mcp_server};
         (id.clone(),json!({"kind":manifest.as_ref().map(|m|m.event.kind()).unwrap_or(source.kind.as_str()),"enabled":enabled,"mcp_server":connection,"valid":valid,"push":source.kind=="plugin" && binding.is_some_and(|b|b.push_enabled)}))
     }).collect();
     Json(EventsResponse {
@@ -258,12 +258,16 @@ pub async fn put_events(
                 "Target SOP needs an explicit owner",
             );
         };
-        if !working.agents.get(owner).is_some_and(|a| a.enabled)
-            || !working.mcp.enabled
-            || !working
-                .mcp_servers_for_agent(owner)
-                .iter()
-                .any(|s| s.name == watch.mcp_server)
+        let source = &working.events.sources[&working.events.rules[id].source];
+        let cli_allowed =
+            source.kind == "plugin" && working.integration_cli_allowed(owner, &source.plugin);
+        if !cli_allowed
+            && (!working.agents.get(owner).is_some_and(|a| a.enabled)
+                || !working.mcp.enabled
+                || !working
+                    .mcp_servers_for_agent(owner)
+                    .iter()
+                    .any(|s| s.name == watch.mcp_server))
         {
             return error(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -276,11 +280,13 @@ pub async fn put_events(
                 Ok(s) => s,
                 Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, e),
             };
-            if !working.integration_poll_allowed(
-                owner,
-                &watch.mcp_server,
-                manifest.event.permission_tool(),
-            ) {
+            if !cli_allowed
+                && !working.integration_poll_allowed(
+                    owner,
+                    &watch.mcp_server,
+                    manifest.event.permission_tool(),
+                )
+            {
                 return error(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "SOP owner must explicitly auto-approve the integration polling tool",

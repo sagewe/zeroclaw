@@ -114,9 +114,9 @@ pub async fn get(State(state): State<AppState>, headers: HeaderMap) -> Response 
             packages: packages
                 .iter()
                 .filter(|p| {
-                    p.manifest
-                        .as_ref()
-                        .is_some_and(|m| m.mcp.matches(s.url.as_deref()))
+                    p.manifest.as_ref().is_some_and(|m| {
+                        m.mcp.as_ref().is_some_and(|m| m.matches(s.url.as_deref()))
+                    })
                 })
                 .map(|p| p.package.clone())
                 .collect(),

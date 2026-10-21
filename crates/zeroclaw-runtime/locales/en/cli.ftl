@@ -1497,3 +1497,8 @@ rpc-config-set-many-limit = config/set-many accepts at most { $limit } entries i
 rpc-config-set-many-entry-rejected = config/set-many entry { $index } (`{ $prop }`) rejected; nothing was saved: { $reason }
 
 skill-http-request-timeout = HTTP request timed out
+
+cli-mijia-tool-description = Operate MiJia through the local CLI. Use devices/switches to discover exact names, show/spec/read to inspect, and power with an exact switch alias or entity ID and on/off to control. Permissions are enforced by the service. No shell syntax, bulk writes, retries or background watch. Use cameras to list the authorized camera and supported native resolutions without capture. Snapshot accepts optional resolution (a listed size or low/high alias); omission keeps the service default. Use snapshot only on explicit user request to see the camera; it returns two actual fresh image attachments, one per lens. No audio, PTZ or continuous recording.
+cli-mijia-tool-failed = MiJia CLI operation failed or is unconfirmed: { $reason }. No automatic control retry.
+
+cli-mijia-resolution-description = Snapshot only. Native stream size or low/high alias; query cameras for supported resolutions. Omit for the service default.

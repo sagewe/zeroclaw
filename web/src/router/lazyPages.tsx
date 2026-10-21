@@ -27,3 +27,5 @@ export const RunDetail = lazy(() => import('../pages/RunDetail'));
 export const Events = lazy(() => import('../pages/Events'));
 
 export const IntegrationPlugins = lazy(() => import('../pages/IntegrationPlugins'));
+
+export const Home = lazy(() => import('../pages/Home'));

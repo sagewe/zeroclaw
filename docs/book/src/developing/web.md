@@ -98,3 +98,8 @@ and `structuredClone()`.
 - Edge 111+
 - Firefox 113+
 - Safari 16.2+
+
+## Private household panel
+
+See [Private household panel](./home-panel.md) for the MiJia service boundary, live
+permissions, cached observations and explicit camera/control actions.

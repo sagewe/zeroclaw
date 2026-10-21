@@ -719,9 +719,9 @@ async fn integration_migration_preserves_checkpoint_and_pause_blocks_queued_disp
     let path = package_root(&config).join("fastmail");
     std::fs::create_dir_all(&path).unwrap();
     let mut manifest = bundled_fastmail().unwrap();
-    manifest.mcp = zeroclaw_config::integration_plugins::RemoteMcp::Absolute {
+    manifest.mcp = Some(zeroclaw_config::integration_plugins::RemoteMcp::Absolute {
         url: "https://example.invalid/mcp".into(),
-    };
+    });
     // Serialize through JSON -> TOML is unnecessary: use the canonical package bytes and replace only fixture endpoint.
     let bytes = include_str!("../../zeroclaw-config/integrations/fastmail/integration.toml")
         .replace("https://api.fastmail.com", "https://example.invalid");

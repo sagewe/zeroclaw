@@ -145,12 +145,35 @@ impl EventWatchChannel {
             native || agent.channels.iter().any(|c| c.as_str() == binding),
             "SOP owner must explicitly bind the event watch"
         );
-        let server = config
-            .mcp_servers_for_agent(&owner)
-            .into_iter()
-            .find(|s| s.name == watch.mcp_server)
-            .context("event watch MCP server is not granted to its owning agent")?;
-        ensure!(config.mcp.enabled, "MCP access disabled");
+        let cli_instance = if native {
+            config
+                .events
+                .sources
+                .get(&config.events.rules[&self.alias].source)
+                .filter(|source| source.kind == "plugin")
+                .filter(|source| {
+                    config
+                        .integration_manifest(&source.plugin)
+                        .is_ok_and(|m| m.cli.is_some())
+                })
+                .map(|source| source.plugin.as_str())
+        } else {
+            None
+        };
+        let server = if let Some(instance) = cli_instance {
+            ensure!(
+                config.integration_plugins.instances[instance].push_enabled,
+                "CLI device events require push"
+            );
+            config.integration_cli_push_connection(&owner, instance)?
+        } else {
+            ensure!(config.mcp.enabled, "MCP access disabled");
+            config
+                .mcp_servers_for_agent(&owner)
+                .into_iter()
+                .find(|s| s.name == watch.mcp_server)
+                .context("event watch MCP server is not granted to its owning agent")?
+        };
         ensure!(
             server.transport == McpTransport::Http,
             "event watch requires an HTTP MCP server"
@@ -175,11 +198,12 @@ impl EventWatchChannel {
             let source = &config.events.sources[&config.events.rules[&self.alias].source];
             let manifest = config.integration_manifest(&source.plugin)?;
             ensure!(
-                config.integration_poll_allowed(
-                    &owner,
-                    &watch.mcp_server,
-                    manifest.event.permission_tool()
-                ),
+                cli_instance.is_some()
+                    || config.integration_poll_allowed(
+                        &owner,
+                        &watch.mcp_server,
+                        manifest.event.permission_tool()
+                    ),
                 "integration poll tool must be explicitly auto-approved by the owning agent"
             );
         }

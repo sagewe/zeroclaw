@@ -482,6 +482,26 @@ pub fn build_spec() -> serde_json::Value {
             "put":{"summary":"Approve and activate integration bindings; reloads daemon registries","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/IntegrationPluginsWrite"}}}},"responses":{"200":{"description":"Saved; reload scheduled"},"409":{"description":"Stale configuration"},"422":{"description":"Invalid package or binding"}}}
         }));
     }
+    if let Some(schemas) = spec
+        .pointer_mut("/components/schemas")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        schemas.insert(
+            "HomeResponse".into(),
+            schema_value::<crate::api_home::HomeResponse>(),
+        );
+        schemas.insert(
+            "HomeAction".into(),
+            schema_value::<crate::api_home::HomeAction>(),
+        );
+    }
+    if let Some(paths) = spec
+        .pointer_mut("/paths")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        paths.insert("/api/home".into(),serde_json::json!({"get":{"summary":"Authorized household observations from the configured MiJia service","responses":{"200":{"description":"Cached observations and current permissions","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HomeResponse"}}}},"403":{"description":"Home integration or permission missing"}}}}));
+        paths.insert("/api/home/action".into(),serde_json::json!({"post":{"summary":"Explicit scoped household operator action; never automatically retry","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/HomeAction"}}}},"responses":{"200":{"description":"Confirmed result or fresh camera images"},"403":{"description":"Permission missing"},"502":{"description":"Operation failed or unconfirmed; do not retry controls automatically"}}}}));
+    }
     flatten_defs_into_components(&mut spec);
     spec
 }

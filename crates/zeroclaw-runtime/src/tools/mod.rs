@@ -13,6 +13,7 @@ pub mod delegate;
 mod delegate_progress;
 pub mod deliver_file;
 pub mod file_read;
+pub mod mijia_cli;
 pub mod model_switch;
 pub mod param_options;
 pub mod read_skill;
@@ -2105,6 +2106,13 @@ fn all_tools_with_runtime_on_thread(
         tool_arcs.push(Arc::new(FileUploadTool::new(
             security.clone(),
             root_config.file_upload.clone(),
+        )));
+    }
+
+    if root_config.integration_cli_allowed(agent_alias, "mijia") {
+        tool_arcs.push(Arc::new(RateLimitedTool::new(
+            mijia_cli::MijiaCliTool::new(live_config.clone(), agent_alias.to_string()),
+            security.clone(),
         )));
     }
 

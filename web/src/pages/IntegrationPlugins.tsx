@@ -28,6 +28,8 @@ const empty: IntegrationBinding = {
   package: "",
   manifest_sha256: "",
   mcp_server: "",
+  cli_command: "",
+  cli_root: "",
   push_enabled: false,
   push_token: null,
 };
@@ -176,17 +178,26 @@ export default function IntegrationPlugins() {
                       </Badge>
                     </div>
                     <p className="text-sm text-pc-text-secondary">
-                      {t("integrations_plugin.capabilities")}
+                      {t(
+                        binding.cli_command
+                          ? "integrations_plugin.cli_capabilities"
+                          : "integrations_plugin.capabilities",
+                      )}
                     </p>
                     <div className="grid sm:grid-cols-2 gap-3">
                       <Link
                         to={
-                          "/config/mcp.servers/" +
-                          encodeURIComponent(binding.mcp_server)
+                          binding.cli_command
+                            ? "/config/integration_plugins.instances/" +
+                              encodeURIComponent(id)
+                            : "/config/mcp.servers/" +
+                              encodeURIComponent(binding.mcp_server)
                         }
                         className="p-3 bg-pc-elevated rounded-lg text-sm"
                       >
-                        MCP · {binding.mcp_server}
+                        {binding.cli_command
+                          ? "CLI · " + binding.cli_command.split("/").pop()
+                          : "MCP · " + binding.mcp_server}
                         <p className="mt-1 text-xs text-pc-text-secondary">
                           {t("integrations_plugin.agent_policy")}
                         </p>
@@ -294,10 +305,14 @@ export default function IntegrationPlugins() {
                   </p>
                   {p.manifest && (
                     <p className="text-xs text-pc-text-secondary">
-                      MCP:{" "}
-                      {"url" in p.manifest.mcp
-                        ? p.manifest.mcp.url
-                        : p.manifest.mcp.path}
+                      {p.manifest.cli
+                        ? "CLI: " + p.manifest.cli.protocol
+                        : p.manifest.mcp
+                          ? "MCP: " +
+                            ("url" in p.manifest.mcp
+                              ? p.manifest.mcp.url
+                              : p.manifest.mcp.path)
+                          : "—"}
                       <br />
                       {t(
                         homePackage(p.manifest)
@@ -385,6 +400,8 @@ export default function IntegrationPlugins() {
                             ...edit.binding,
                             package: e.target.value,
                             mcp_server: "",
+                            cli_command: "",
+                            cli_root: "",
                             manifest_sha256: "",
                           },
                           approvedDigest: null,
@@ -401,35 +418,65 @@ export default function IntegrationPlugins() {
                         ))}
                     </select>
                   </label>
-                  <label className="block text-sm space-y-1">
-                    <span>{t("events.connection")}</span>
-                    <select
-                      className={input}
-                      required
-                      value={edit.binding.mcp_server}
-                      onChange={(e) =>
-                        setEdit({
-                          ...edit,
-                          binding: {
-                            ...edit.binding,
-                            mcp_server: e.target.value,
-                          },
-                        })
-                      }
-                    >
-                      <option value="">{t("events.select")}</option>
-                      {data.connections
-                        .filter((c) =>
-                          c.packages.includes(edit.binding.package),
-                        )
-                        .map((c) => (
-                          <option key={c.name}>{c.name}</option>
-                        ))}
-                    </select>
-                  </label>
-                  <p className="text-xs text-pc-text-secondary">
-                    {t("integrations_plugin.connection_hint")}
-                  </p>
+                  {pkg?.manifest?.cli ? (
+                    <div className="space-y-3">
+                      {(["cli_command", "cli_root"] as const).map((key) => (
+                        <label key={key} className="block text-sm space-y-1">
+                          <span>{t("integrations_plugin." + key)}</span>
+                          <input
+                            className={input}
+                            required
+                            value={edit.binding[key]}
+                            onChange={(e) =>
+                              setEdit({
+                                ...edit,
+                                binding: {
+                                  ...edit.binding,
+                                  mcp_server: "",
+                                  [key]: e.target.value,
+                                },
+                              })
+                            }
+                          />
+                        </label>
+                      ))}
+                      <p className="text-xs text-pc-text-secondary">
+                        {t("integrations_plugin.cli_hint")}
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <label className="block text-sm space-y-1">
+                        <span>{t("events.connection")}</span>
+                        <select
+                          className={input}
+                          required
+                          value={edit.binding.mcp_server}
+                          onChange={(e) =>
+                            setEdit({
+                              ...edit,
+                              binding: {
+                                ...edit.binding,
+                                mcp_server: e.target.value,
+                              },
+                            })
+                          }
+                        >
+                          <option value="">{t("events.select")}</option>
+                          {data.connections
+                            .filter((c) =>
+                              c.packages.includes(edit.binding.package),
+                            )
+                            .map((c) => (
+                              <option key={c.name}>{c.name}</option>
+                            ))}
+                        </select>
+                      </label>
+                      <p className="text-xs text-pc-text-secondary">
+                        {t("integrations_plugin.connection_hint")}
+                      </p>
+                    </>
+                  )}
                   {pkg?.manifest?.push && (
                     <div className="space-y-3 border-t border-pc-border pt-3">
                       <label className="flex items-center gap-2 text-sm">

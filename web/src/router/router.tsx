@@ -10,6 +10,7 @@ import {
   Config,
   Cron,
   Dashboard,
+  Home,
   Doctor,
   Integrations,
   IntegrationPlugins,
@@ -43,6 +44,7 @@ export const Router = () => (
     <Routes>
       <Route element={<Layout />}>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/home" element={<Home />} />
         <Route path="/agent" element={<Navigate to="/agents" replace />} />
         <Route path="/agents" element={<AgentsList />} />
         <Route path="/agent/:alias" element={<AgentChat />} />

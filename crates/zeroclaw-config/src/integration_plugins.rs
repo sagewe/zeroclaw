@@ -32,6 +32,9 @@ pub struct IntegrationBinding {
     pub package: String,
     pub manifest_sha256: String,
     pub mcp_server: String,
+    /// Explicit local CLI executable and its service root. Mutually exclusive with MCP.
+    pub cli_command: String,
+    pub cli_root: String,
     /// Select the package's push transport. Polling remains the upgrade default.
     pub push_enabled: bool,
     /// Separate read-only JMAP credential; never included in package files.
@@ -48,11 +51,20 @@ pub struct IntegrationManifest {
     pub version: String,
     pub title: String,
     pub description: String,
-    pub mcp: RemoteMcp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<RemoteMcp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<CliSpec>,
     pub event: IntegrationEventSpec,
     pub template: SopTemplate,
     #[serde(default)]
     pub push: Option<IntegrationPushSpec>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CliSpec {
+    pub protocol: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -245,21 +257,31 @@ impl IntegrationManifest {
                 && self.description.len() <= 2048,
             "invalid integration metadata"
         );
-        match &self.mcp {
-            RemoteMcp::Absolute { url } => {
-                ensure!(self.mcp.matches(Some(url)), "invalid integration MCP URL")
+        match (&self.mcp, &self.cli) {
+            (Some(RemoteMcp::Absolute { url }), None) => {
+                ensure!(
+                    self.mcp.as_ref().is_some_and(|m| m.matches(Some(url))),
+                    "invalid integration MCP URL"
+                );
             }
-            RemoteMcp::HomeAssistant { path } => ensure!(
+            (Some(RemoteMcp::HomeAssistant { path }), None) => ensure!(
                 path == "/api/mcp" && matches!(self.event, IntegrationEventSpec::HomeAssistant(_)),
                 "relative MCP paths are only supported for Home Assistant"
             ),
+            (None, Some(cli)) => ensure!(
+                cli.protocol == "mijia_cli_v1"
+                    && matches!(self.event, IntegrationEventSpec::HomeAssistant(_)),
+                "unsupported CLI integration"
+            ),
+            _ => anyhow::bail!("integration needs exactly one MCP or CLI protocol"),
         }
         self.event.validate()?;
         match (&self.event, &self.push) {
             (IntegrationEventSpec::Mail(_), Some(IntegrationPushSpec::Jmap(push))) => push
                 .validate(
                     self.mcp
-                        .absolute_url()
+                        .as_ref()
+                        .and_then(RemoteMcp::absolute_url)
                         .context("JMAP needs an absolute MCP endpoint")?,
                 )?,
             (
@@ -330,8 +352,13 @@ impl IntegrationPluginsConfig {
                 "invalid integration instance or package id"
             );
             ensure!(
-                !binding.mcp_server.is_empty(),
-                "integration instance needs a connection"
+                (!binding.mcp_server.is_empty()
+                    && binding.cli_command.is_empty()
+                    && binding.cli_root.is_empty())
+                    || (binding.mcp_server.is_empty()
+                        && Path::new(&binding.cli_command).is_absolute()
+                        && Path::new(&binding.cli_root).is_absolute()),
+                "integration instance needs exactly one MCP or absolute CLI connection"
             );
             ensure!(
                 binding.manifest_sha256.len() == 64
@@ -348,7 +375,7 @@ impl IntegrationPluginsConfig {
                 );
             }
             ensure!(
-                servers.insert(&binding.mcp_server),
+                binding.mcp_server.is_empty() || servers.insert(&binding.mcp_server),
                 "an MCP connection may belong to only one integration instance"
             );
         }
@@ -413,6 +440,19 @@ impl Config {
             digest.eq_ignore_ascii_case(&binding.manifest_sha256),
             "integration package differs from the operator-approved digest"
         );
+        if manifest.cli.is_some() {
+            ensure!(
+                binding.mcp_server.is_empty()
+                    && Path::new(&binding.cli_command).is_absolute()
+                    && Path::new(&binding.cli_root).is_absolute(),
+                "CLI integration needs an absolute command and root"
+            );
+            return Ok(manifest);
+        }
+        ensure!(
+            binding.cli_command.is_empty() && binding.cli_root.is_empty(),
+            "MCP integration cannot execute a CLI"
+        );
         let server = self
             .mcp
             .servers
@@ -420,7 +460,11 @@ impl Config {
             .find(|s| s.name == binding.mcp_server)
             .context("integration MCP connection missing")?;
         ensure!(
-            server.transport == McpTransport::Http && manifest.mcp.matches(server.url.as_deref()),
+            server.transport == McpTransport::Http
+                && manifest
+                    .mcp
+                    .as_ref()
+                    .is_some_and(|m| m.matches(server.url.as_deref())),
             "integration connection does not match its declared MCP endpoint"
         );
         Ok(manifest)
@@ -443,7 +487,11 @@ impl Config {
                 .context("event integration missing")?;
             let manifest = self.integration_manifest(&source.plugin)?;
             view.source = manifest.event.kind().into(); // retain each adapter's checkpoint identity
-            view.mcp_server = binding.mcp_server.clone();
+            view.mcp_server = if manifest.cli.is_some() {
+                source.plugin.clone()
+            } else {
+                binding.mcp_server.clone()
+            };
             view.enabled &= binding.enabled;
         }
         if view.source == "fastmail" {
@@ -457,6 +505,83 @@ impl Config {
         }
         view.validate()?;
         Ok(view)
+    }
+    /// CLI tool grants are explicit and resolved from the current owning agent policy.
+    pub fn integration_cli_allowed(&self, owner: &str, instance: &str) -> bool {
+        let Some(binding) = self.integration_plugins.instances.get(instance) else {
+            return false;
+        };
+        let Some(risk) = self.risk_profile_for_agent(owner) else {
+            return false;
+        };
+        instance == "mijia"
+            && binding.enabled
+            && self.agents.get(owner).is_some_and(|a| a.enabled)
+            && self
+                .integration_manifest(instance)
+                .is_ok_and(|m| m.cli.is_some())
+            && !risk.deny_all_tools
+            && !risk.excluded_tools.iter().any(|n| n == "mijia_cli")
+            && !risk.always_ask.iter().any(|n| n == "mijia_cli")
+            && risk.auto_approve.iter().any(|n| n == "mijia_cli")
+            && (risk.allowed_tools.is_empty()
+                || risk.allowed_tools.iter().any(|n| n == "mijia_cli"))
+    }
+    /// Compatibility input for the existing device WebSocket adapter only. This
+    /// does not register an MCP server or perform an MCP request.
+    pub fn integration_cli_push_connection(
+        &self,
+        owner: &str,
+        instance: &str,
+    ) -> Result<crate::schema::McpServerConfig> {
+        ensure!(
+            self.integration_cli_allowed(owner, instance),
+            "CLI integration permission missing"
+        );
+        let binding = &self.integration_plugins.instances[instance];
+        let root = Path::new(&binding.cli_root);
+        let read_private = |name: &str, cap: u64| -> Result<Vec<u8>> {
+            let path = root.join(name);
+            let meta = std::fs::symlink_metadata(&path)?;
+            ensure!(
+                meta.is_file() && meta.len() <= cap,
+                "invalid CLI service file"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                ensure!(
+                    meta.permissions().mode() & 0o077 == 0,
+                    "CLI service file must be private"
+                );
+            }
+            let bytes = std::fs::read(path)?;
+            ensure!(bytes.len() as u64 <= cap, "CLI service file too large");
+            Ok(bytes)
+        };
+        let policy: serde_json::Value =
+            serde_json::from_slice(&read_private("policy.json", 65536)?)?;
+        ensure!(
+            policy["enabled"] == true && policy["bind"] == "127.0.0.1",
+            "CLI service must be enabled and loopback-bound"
+        );
+        let port = policy["port"]
+            .as_u64()
+            .filter(|p| (1..=65535).contains(p))
+            .context("invalid CLI service port")?;
+        let token = String::from_utf8(read_private("access.token", 4096)?)?;
+        let token = token.trim();
+        ensure!(
+            token.len() >= 32 && !token.contains(['\r', '\n']),
+            "invalid CLI service credential"
+        );
+        Ok(crate::schema::McpServerConfig {
+            name: instance.into(),
+            transport: McpTransport::Http,
+            url: Some(format!("http://127.0.0.1:{port}/api/websocket")),
+            headers: HashMap::from([("Authorization".into(), format!("Bearer {token}"))]),
+            ..Default::default()
+        })
     }
     pub fn integration_poll_allowed(&self, owner: &str, server: &str, tool: &str) -> bool {
         let Some(risk) = self.risk_profile_for_agent(owner) else {
@@ -504,6 +629,13 @@ impl Config {
                 Ok(Some(EventPushConfig::Jmap(push, token.clone())))
             }
             IntegrationPushSpec::HomeAssistant(_) => {
+                if manifest.cli.is_some() {
+                    ensure!(
+                        binding.push_token.is_none(),
+                        "CLI push resolves the service credential from its root"
+                    );
+                    return Ok(Some(EventPushConfig::HomeAssistant));
+                }
                 let server = self
                     .mcp
                     .servers
@@ -547,6 +679,113 @@ mod tests {
     use crate::schema::{AliasedAgentConfig, McpBundleConfig, McpServerConfig, RiskProfileConfig};
 
     #[test]
+    fn cli_integration_needs_no_mcp_and_resolves_live_grants_and_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            config_path: dir.path().join("config.toml"),
+            ..Default::default()
+        };
+        config.mcp.enabled = false;
+        let package = package_root(&config).join("mijia");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("integration.toml"),
+            r#"schema_version=1
+name="mijia"
+version="1"
+title="MiJia CLI"
+description="Fixture"
+[cli]
+protocol="mijia_cli_v1"
+[event]
+adapter="home_assistant_state_v1"
+type="condition_entered"
+permission_tool="mijia_cli"
+[push]
+transport="home_assistant_websocket_v1"
+[template]
+name="observe-home"
+description="Fixture"
+sop_toml=""
+sop_markdown=""
+"#,
+        )
+        .unwrap();
+        let (_, digest) = load_package(&package_root(&config), "mijia").unwrap();
+        config.integration_plugins.instances.insert(
+            "mijia".into(),
+            IntegrationBinding {
+                enabled: true,
+                package: "mijia".into(),
+                manifest_sha256: digest,
+                cli_command: "/usr/bin/fixture".into(),
+                cli_root: dir.path().display().to_string(),
+                push_enabled: true,
+                ..Default::default()
+            },
+        );
+        config.agents.insert(
+            "observer".into(),
+            AliasedAgentConfig {
+                enabled: true,
+                risk_profile: "observer".into(),
+                ..Default::default()
+            },
+        );
+        config.risk_profiles.insert(
+            "observer".into(),
+            RiskProfileConfig {
+                auto_approve: vec!["mijia_cli".into()],
+                ..Default::default()
+            },
+        );
+        for (name, content) in [
+            (
+                "policy.json",
+                r#"{"enabled":true,"bind":"127.0.0.1","port":19842}"#,
+            ),
+            ("access.token", "0123456789abcdef0123456789abcdef"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        assert!(config.integration_cli_allowed("observer", "mijia"));
+        let first = config
+            .integration_cli_push_connection("observer", "mijia")
+            .unwrap();
+        assert_eq!(
+            first.url.as_deref(),
+            Some("http://127.0.0.1:19842/api/websocket")
+        );
+        std::fs::write(
+            dir.path().join("access.token"),
+            "abcdef0123456789abcdef0123456789",
+        )
+        .unwrap();
+        let next = config
+            .integration_cli_push_connection("observer", "mijia")
+            .unwrap();
+        assert_ne!(first.headers, next.headers);
+        assert!(config.mcp_servers_for_agent("observer").is_empty());
+        config
+            .risk_profiles
+            .get_mut("observer")
+            .unwrap()
+            .excluded_tools
+            .push("mijia_cli".into());
+        assert!(!config.integration_cli_allowed("observer", "mijia"));
+        assert!(
+            config
+                .integration_cli_push_connection("observer", "mijia")
+                .is_err()
+        );
+    }
+    #[test]
     fn integration_and_event_fields_use_their_canonical_config_paths() {
         let mut config = Config::default();
         for (path, value) in [
@@ -586,6 +825,8 @@ mod tests {
                 bundled_fastmail()
                     .unwrap()
                     .mcp
+                    .as_ref()
+                    .unwrap()
                     .absolute_url()
                     .unwrap()
                     .to_owned(),
@@ -775,6 +1016,8 @@ mod tests {
             bundled_fastmail()
                 .unwrap()
                 .mcp
+                .as_ref()
+                .unwrap()
                 .absolute_url()
                 .unwrap()
                 .to_owned(),
@@ -827,9 +1070,9 @@ mod tests {
                 .is_err()
         );
         let mut manifest = bundled_fastmail().unwrap();
-        manifest.mcp = RemoteMcp::Absolute {
+        manifest.mcp = Some(RemoteMcp::Absolute {
             url: "https://user:secret@example.invalid/mcp".into(),
-        };
+        });
         assert!(manifest.validate().is_err());
     }
 
