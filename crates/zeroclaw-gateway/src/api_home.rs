@@ -1,5 +1,9 @@
-//! Private household operator surface. Canonical device state lives in the
-//! configured MiJia service; connections and effective grants remain live config.
+//! Private household operator surface. Canonical device state lives in
+//! clowder (the home hub since 2026-10-25), read from its `/api/home` next to
+//! the MCP endpoint of the `openhab` connection, with that connection's
+//! headers. Admission follows the live grants of the same MCP tools: reading
+//! needs `get_home_status`, camera frames `get_item`, switching `set_item`
+//! (and an autonomy above read-only).
 use crate::{AppState, api::require_auth};
 use anyhow::{Context, Result, ensure};
 use axum::{
@@ -11,8 +15,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeroclaw_config::schema::{Config, McpServerConfig};
-use zeroclaw_runtime::tools::mijia_cli::{CliRequest, run_cli};
-use zeroclaw_tools::mcp_client::McpServer;
 
 #[derive(Serialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -39,6 +41,10 @@ pub enum PowerState {
     Off,
 }
 
+/// The clowder connection keeps openHAB's server name, so the agents'
+/// `openhab__*` approvals carry over.
+const HOME_SERVER: &str = "openhab";
+
 fn connection(config: &Config, agent: &str, server: &str, tool: &str) -> Result<McpServerConfig> {
     ensure!(
         config.mcp.enabled && config.agents.get(agent).is_some_and(|a| a.enabled),
@@ -54,124 +60,59 @@ fn connection(config: &Config, agent: &str, server: &str, tool: &str) -> Result<
         .find(|s| s.name == server)
         .context("home_connection_not_granted")
 }
-// This local integration is opt-in: a valid pinned package, enabled binding,
-// enabled agent, bundle membership and explicit per-tool approval are required.
-fn owner(config: &Config) -> Result<(String, String)> {
-    let binding = config
-        .integration_plugins
-        .instances
-        .get("mijia")
-        .context("home_not_configured")?;
-    ensure!(binding.enabled, "home_disabled");
-    let manifest = config.integration_manifest("mijia")?;
-    if manifest.cli.is_some() {
-        let agent = config
-            .agents
-            .keys()
-            .filter(|a| config.integration_cli_allowed(a, "mijia"))
-            .min()
-            .context("home_permission_required")?;
-        return Ok((agent.clone(), "mijia".into()));
-    }
+/// The first enabled agent, in sorted alias order, that may read the home.
+fn owner(config: &Config) -> Result<String> {
     let mut agents: Vec<_> = config.agents.keys().collect();
     agents.sort();
-    let agent = agents
+    agents
         .into_iter()
-        .find(|a| connection(config, a, &binding.mcp_server, "dashboard").is_ok())
-        .context("home_permission_required")?;
-    Ok((agent.clone(), binding.mcp_server.clone()))
+        .find(|a| connection(config, a, HOME_SERVER, "get_home_status").is_ok())
+        .cloned()
+        .context("home_permission_required")
 }
-async fn call(
+fn allowed(config: &Config, agent: &str, tool: &str) -> bool {
+    connection(config, agent, HOME_SERVER, tool).is_ok()
+        && (tool != "set_item"
+            || config
+                .risk_profile_for_agent(agent)
+                .is_some_and(|r| r.level != zeroclaw_config::autonomy::AutonomyLevel::ReadOnly))
+}
+/// `/api/home…` on clowder. Admission is resolved again right before the
+/// request, from live config.
+async fn clowder(
     state: &AppState,
     headers: &HeaderMap,
     agent: &str,
-    server: &str,
     tool: &str,
-    args: Value,
+    path: &str,
+    body: Option<Value>,
 ) -> Result<Value> {
-    let mut cfg = connection(&state.config.read(), agent, server, tool)?;
-    let original = serde_json::to_value(&cfg)?;
-    let cap = 2 * 1024 * 1024;
-    cfg.max_response_bytes = Some(
-        cfg.max_response_bytes
-            .filter(|n| *n > 0)
-            .unwrap_or(cap)
-            .min(cap),
-    );
-    cfg.tool_timeout_secs = Some(cfg.tool_timeout_secs.unwrap_or(50).min(50));
-    let client = McpServer::connect(cfg).await?;
+    let cfg = {
+        let config = state.config.read();
+        ensure!(owner(&config)? == agent, "home_scope_changed");
+        ensure!(allowed(&config, agent, tool), "home_permission_required");
+        connection(&config, agent, HOME_SERVER, tool)?
+    };
     ensure!(require_auth(state, headers).is_ok(), "home_auth_revoked");
-    // Re-resolve admission after the asynchronous handshake, before side effects.
-    {
-        let current = state.config.read();
-        let (live_agent, live_server) = owner(&current)?;
-        ensure!(
-            live_agent == agent && live_server == server,
-            "home_scope_changed"
-        );
-        let live = connection(&current, agent, server, tool)?;
-        ensure!(
-            serde_json::to_value(&live)? == original,
-            "home_scope_changed"
-        );
+    let url = cfg.url.as_deref().context("home_connection_invalid")?;
+    let base = url.trim_end_matches('/').trim_end_matches("/mcp");
+    ensure!(base.starts_with("https://"), "home_connection_invalid");
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(50))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut req = match &body {
+        Some(b) => http.post(format!("{base}{path}")).json(b),
+        None => http.get(format!("{base}{path}")),
+    };
+    for (k, v) in &cfg.headers {
+        req = req.header(k, v);
     }
-    let raw = client.call_tool(tool, args).await?;
-    ensure!(raw["isError"] != true, "home_operation_failed");
-    Ok(raw)
-}
-fn device_allowed(config: &Config, agent: &str, server: &str, tool: &str) -> bool {
-    if config
-        .integration_manifest("mijia")
-        .is_ok_and(|m| m.cli.is_some())
-    {
-        config.integration_cli_allowed(agent, "mijia")
-            && (tool != "set_power"
-                || config
-                    .risk_profile_for_agent(agent)
-                    .is_some_and(|r| r.level != zeroclaw_config::autonomy::AutonomyLevel::ReadOnly))
-    } else {
-        connection(config, agent, server, tool).is_ok()
-    }
-}
-async fn invoke_device(
-    state: &AppState,
-    headers: &HeaderMap,
-    agent: &str,
-    server: &str,
-    tool: &str,
-    args: Value,
-) -> Result<Value> {
-    if state
-        .config
-        .read()
-        .integration_manifest("mijia")?
-        .cli
-        .is_some()
-    {
-        ensure!(require_auth(state, headers).is_ok(), "home_auth_revoked");
-        let request = match tool {
-            "camera_snapshot" => json!({"command":"snapshot"}),
-            "dashboard" => json!({"command":"dashboard"}),
-            "list_devices" => json!({"command":"refresh"}),
-            "get_device_spec" => json!({"command":"spec","target":args["device_id"]}),
-            "set_power" => json!({"command":"power","target":args["light"],"state":args["state"]}),
-            _ => anyhow::bail!("home_unsupported_cli_action"),
-        };
-        let request: CliRequest = serde_json::from_value(request)?;
-        run_cli(&state.config, agent, request).await
-    } else {
-        data(call(state, headers, agent, server, tool, args).await?)
-    }
-}
-fn data(raw: Value) -> Result<Value> {
-    let text = raw["content"]
-        .as_array()
-        .context("home_response_invalid")?
-        .iter()
-        .find(|v| v["type"] == "text")
-        .and_then(|v| v["text"].as_str())
-        .context("home_response_invalid")?;
-    Ok(serde_json::from_str(text)?)
+    let resp = req.send().await?;
+    ensure!(resp.status().is_success(), "home_operation_failed");
+    let bytes = resp.bytes().await?;
+    ensure!(bytes.len() <= 4 * 1024 * 1024, "home_response_invalid");
+    Ok(serde_json::from_slice(&bytes)?)
 }
 fn failure(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({"error":code}))).into_response()
@@ -183,22 +124,25 @@ pub async fn get_home(State(state): State<AppState>, headers: HeaderMap) -> Resp
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Ok((agent, server)) = owner(&state.config.read()) else {
+    let Ok(agent) = owner(&state.config.read()) else {
         return failure(StatusCode::FORBIDDEN, "home_not_available");
     };
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(55),
-        invoke_device(&state, &headers, &agent, &server, "dashboard", json!({})),
+    let Ok(view) = clowder(
+        &state,
+        &headers,
+        &agent,
+        "get_home_status",
+        "/api/home",
+        None,
     )
-    .await;
-    let Ok(Ok(raw)) = result else {
+    .await
+    else {
         return failure(StatusCode::BAD_GATEWAY, "home_service_unavailable");
     };
-    let view = raw;
     let config = state.config.read();
     private_json(HomeResponse {
-        can_control: device_allowed(&config, &agent, &server, "set_power"),
-        can_capture: config.integration_cli_allowed(&agent, "mijia")
+        can_control: allowed(&config, &agent, "set_item"),
+        can_capture: allowed(&config, &agent, "get_item")
             && view["cameras"].as_array().is_some_and(|v| !v.is_empty()),
         agent,
         data: view,
@@ -212,55 +156,48 @@ pub async fn action(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let Ok((agent, server)) = owner(&state.config.read()) else {
+    let Ok(agent) = owner(&state.config.read()) else {
         return failure(StatusCode::FORBIDDEN, "home_not_available");
     };
-    let (server, tool, args) = match &action {
-        HomeAction::Refresh {} => (server, "list_devices", json!({})),
+    let (tool, path, body) = match &action {
+        // clowder keeps its device list current itself.
+        HomeAction::Refresh {} => ("get_home_status", "/api/home", None),
         HomeAction::SetPower { light, state } => {
             if light.is_empty() || light.len() > 256 {
                 return failure(StatusCode::BAD_REQUEST, "home_invalid_light");
             }
             (
-                server,
-                "set_power",
-                json!({"light":light,"state":match state{PowerState::On=>"on",PowerState::Off=>"off"}}),
+                "set_item",
+                "/api/home/power",
+                Some(
+                    json!({"light":light,"state":match state{PowerState::On=>"on",PowerState::Off=>"off"}}),
+                ),
             )
         }
-        HomeAction::Snapshot {} => (server, "camera_snapshot", json!({})),
+        HomeAction::Snapshot {} => ("get_item", "/api/home/snapshot", None),
+        // clowder has no MIoT capability definitions to offer.
         HomeAction::DeviceSpec { device_id } => {
             if device_id.is_empty() || device_id.len() > 128 {
                 return failure(StatusCode::BAD_REQUEST, "home_invalid_device");
             }
-            (server, "get_device_spec", json!({"device_id":device_id}))
+            return private_json(json!({"services": []}));
         }
     };
-    let permitted = if matches!(action, HomeAction::Snapshot {}) {
-        state.config.read().integration_cli_allowed(&agent, "mijia")
-    } else {
-        device_allowed(&state.config.read(), &agent, &server, tool)
-    };
-    if !permitted {
+    if !allowed(&state.config.read(), &agent, tool) {
         return failure(StatusCode::FORBIDDEN, "home_permission_required");
     }
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(55),
-        invoke_device(&state, &headers, &agent, &server, tool, args),
-    )
-    .await;
-    let Ok(Ok(raw)) = result else {
+    let Ok(raw) = clowder(&state, &headers, &agent, tool, path, body).await else {
         return failure(
             StatusCode::BAD_GATEWAY,
             "home_operation_unconfirmed_no_retry",
         );
     };
-    if matches!(action, HomeAction::Snapshot {}) {
-        if raw["images"]
+    if matches!(action, HomeAction::Snapshot {})
+        && raw["images"]
             .as_array()
             .is_none_or(|images| images.len() != 2)
-        {
-            return failure(StatusCode::BAD_GATEWAY, "home_snapshot_incomplete");
-        }
+    {
+        return failure(StatusCode::BAD_GATEWAY, "home_snapshot_incomplete");
     }
     private_json(raw)
 }

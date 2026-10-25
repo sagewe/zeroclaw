@@ -166,7 +166,7 @@ export default function Home() {
     if (event.kind === "control_completed")
       return `${event.data.light ?? ""} · ${t("home.state." + event.data.requested)} · ${t(event.data.success ? "home.confirmed" : "home.unconfirmed")}${event.data.result?.changed === false ? " · " + t("home.no_change") : ""}`;
     if (typeof event.data.value === "object" || (typeof event.data.value === "string" && event.data.value.length > 80)) return t("home.report_updated");
-    return `${t("home.property_changed")} · ${displayValue(event.data.old)} → ${displayValue(event.data.value)}`;
+    return `${event.data.label ?? t("home.property_changed")} · ${displayValue(event.data.old)} → ${displayValue(event.data.value)}`;
   };
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
@@ -243,7 +243,7 @@ export default function Home() {
                   <WifiOff size={18} />
                 )
               }
-              detail={`Rust ${data.health.version} · ${t("home.direct")}`}
+              detail={`clowder ${data.health.version}`}
             />
             <Metric
               label={t("home.devices")}
@@ -635,7 +635,7 @@ export default function Home() {
                   <Card key={`${p.siid}.${p.piid}`} className="space-y-1">
                     <div className="flex justify-between gap-4">
                       <span className="text-sm">
-                        {prop?.description || `${p.siid}.${p.piid}`}
+                        {p.label || prop?.description || `${p.siid}.${p.piid}`}
                       </span>
                       <span className="font-mono text-sm break-all">
                         {prop?.["value-list"]?.find((v) => v.value === p.value)

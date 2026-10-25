@@ -20,6 +20,8 @@ export interface HomeProperty {
   device_id: string;
   siid: number;
   piid: number;
+  /** clowder: the point's label; MIoT ids then carry no meaning. */
+  label?: string;
   value: unknown;
   source: string;
   reported_at_ms: number;
@@ -32,6 +34,7 @@ export interface HomeEvent {
     online?: boolean;
     siid?: number;
     piid?: number;
+    label?: string;
     old?: unknown;
     value?: unknown;
     light?: string;

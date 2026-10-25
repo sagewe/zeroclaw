@@ -9,6 +9,7 @@ homepage.workspace = true
 publish = true
 
 [dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 zeroclaw-events.workspace = true
 # Internal workspace crates
 zeroclaw-api.workspace = true
